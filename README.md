@@ -1,96 +1,193 @@
-# Decisions.FetchEntitiesAdvanced
+# Fetch Entities (Advanced)
 
-An advanced "Fetch Entities" flow step for the Decisions platform (v9.25+) that goes beyond
-the built-in step with mixed AND/OR filter logic, per-condition null handling, EXISTS subquery
-filtering, explicit JOIN-based related entity loading, and SQL paging.
+> ⚠️ **Important:** Use this module at your own risk. See the **Disclaimer** section below.
+
+A flow step module for the [Decisions](https://decisions.com) platform that replaces the built-in *Fetch Entities* step with full AND/OR filter trees, explicit JOIN-based related-entity loading, collection and entity-reference field filtering, and SQL paging.
 
 ## Features
 
-| Feature | Description |
-|---|---|
-| **Mixed AND/OR filters** | `FilterGroup` supports nested AND/OR groups with sub-groups |
-| **Per-condition null handling** | `SkipFilter`, `MatchNull`, or `ReturnNoResults` per field |
-| **EXISTS/NOT EXISTS filters** | Filter by child collections via `ORMOneToManyRelationship` without including child data in output |
-| **Explicit JOINs** | Join any ORM entity type to any other via user-specified fields; supports chaining (A → B → C) |
-| **Output Joined Data** | Toggle: joins can filter-only (EXISTS) or batch-load related entities into a generated output type |
-| **Generated output type** | Auto-generated `DefinedDataStructure` DTO created on first save; immutable shape validation on subsequent saves |
-| **Paging** | PageSize + PageNumber flow input (sort field required) |
-| **Full parity** | FastFetch, EditCopy, ReadUncommitted, FetchDeletedEntities, RespectPermission, LimitResults |
+- **Recursive AND/OR filter tree** — nest filter groups to any depth with AND or OR logic.
+- **Rich filter operators** — `=`, `≠`, `>`, `≥`, `<`, `≤`, `LIKE` (with `%` wildcards), plus unary checks: IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY, IS NULL OR EMPTY, IS NOT NULL OR EMPTY.
+- **Step-input values** — any filter condition can be wired to a flow input instead of a static value.
+- **Collection field filtering** — filter on `ORMOneToManyRelationship` child lists: Contains, Does Not Contain, First/Last In List, Count comparisons (`=`, `≠`, `>`, `≥`, `<`, `≤`), and aggregate comparisons (Sum, Average, Min, Max of a sub-field).
+- **Entity-reference field filtering** — traverse dot-path chains through entity-reference navigation properties (e.g. `SubtypeData.NestedRef.SomeField`).
+- **JOIN-based output** — join any ORM entity to the primary result; output is a generated DTO with a `Source` property and one array per join.
+- **Inverse FK joins** — join from child to parent even when the FK column has no C# property on the child class (managed by the parent's `ORMOneToManyRelationship`).
+- **Filter-only JOINs** — joins with *Include In Output* disabled and *Require Match* enabled translate to correlated EXISTS subqueries.
+- **Chained JOINs** — join a second type to the result of a first join (A → B → C).
+- **Sort & limit** — sort by any field; optionally cap results with *Limit Results*.
+- **SQL paging** — enable *Use Paging* to get `PageSize` and `PageNumber` step inputs (sort field required for stable pages).
+- **Full parity with built-in step** — Fast Fetch, Edit Copy, Read Uncommitted (NoLock), Fetch Deleted Entities, Respect Permission, Folder-aware filtering.
+- **Debug output** — enable *Show Query In Output* to capture the generated SQL in the flow output.
+- **Validation** — stale join conditions and sort fields are flagged when the primary type changes.
+
+## Requirements
+
+- Decisions 9.25 or later
 
 ## Installation
 
-1. Build the module:
-   ```bash
-   chmod +x build_module.sh
-   ./build_module.sh
-   ```
-2. Upload `Decisions.FetchEntitiesAdvanced.zip` to your Decisions instance via the Module Manager.
+### Option 1: Install Pre-built Module
+1. Download the compiled module (`.zip` file).
+2. Log into the Decisions Portal.
+3. Navigate to **System > Administration > Features**.
+4. Click **Install Module**.
+5. Upload the `.zip` file.
+6. Restart the Decisions service if prompted.
+
+### Option 2: Build from Source
+See the [Building from Source](#building-from-source) section below.
 
 ## Usage
 
-### Basic filtering with AND/OR groups
+Once installed, add the module as a dependency to your project, then drag **Fetch Entities (Advanced)** from the **Database** category in the Flow Designer.
 
-1. Drop **Fetch Entities (Advanced)** onto a flow.
-2. Set **Type Name** to the ORM entity type (e.g., `DecisionsFramework.ServiceLayer.Services.Accounts.Account`).
-3. Configure **Root Filter Group**: add conditions, set their **Input Alias** (creates a flow input), **Match Type**, and **When Null** behaviour.
-4. Map flow data to the generated inputs.
+### Basic filtering
 
-### EXISTS filtering (filter by child collections)
+1. Set **Type Name** to the ORM entity type you want to query.
+2. Add one or more **Filters**. Each filter node can be:
+   - A **leaf condition** — pick a field, an operator, and a value (static or step input).
+   - An **AND** or **OR** group — add child conditions that are combined with the chosen logic.
+3. Wire any step-input conditions from your flow data.
 
-1. Add a **Related Entity Filter** with the `ORMOneToManyRelationship` field name.
-2. Set **Presence** to `HasAtLeastOne` (EXISTS) or `HasNone` (NOT EXISTS).
-3. Optionally add a **Filter Group** for additional child-entity conditions.
+### LIKE operator
 
-### JOIN-based output (joined data)
+Use `%` as a wildcard character in string values:
+- `%foo` — ends with "foo"
+- `foo%` — starts with "foo"
+- `%foo%` — contains "foo"
 
-1. Enable **Output Joined Data**.
-2. Set **Output Type Name** (e.g., `LocationWithRooms`).
-3. Add one or more **Join Definitions**:
-   - **Related Type Name**: the type to join (e.g., `MyApp.Entities.Room`)
-   - **Related Join Field**: the FK field on the related type (e.g., `LocationId`)
-   - **Source Table**: `"main"` for primary → related; or an earlier join's **Output Alias** for chaining
-   - **Source Join Field**: the matching field on the source (e.g., `Id`)
-   - **Output Alias**: the property name on the generated type (e.g., `Rooms`)
-   - **Is One To Many**: `true` → `Room[]`, `false` → `Room`
-   - **Require Match**: whether to exclude primary entities with no matching related rows
-4. **Save** the step — the output type is generated automatically on the first save.
-5. The step outputs `LocationWithRooms[]` containing a `Source` property (the primary entity)
-   and one property per join alias.
+### Collection field filtering
+
+When a field is a child-entity list (`ORMOneToManyRelationship`), additional operators appear:
+
+| Operator | Description |
+|---|---|
+| List Contains / Does Not Contain | At least one (or no) child row matches a sub-field condition. |
+| First In List / Last In List | The first or last child row (by PK) matches a sub-field condition. |
+| Count = / ≠ / > / ≥ / < / ≤ | Compare the number of child rows to a threshold. |
+| Sum / Average / Min / Max Of | Aggregate a numeric sub-field and compare to a threshold. |
+
+### JOIN-based output
+
+1. Add a **Join Datatype** entry.
+2. Set **Source** (the primary type or a prior join's alias) and **Join Datatype** (the related type).
+3. Add one or more **Join Conditions** — map a field from the join type to a field from the source, or to a literal value.
+4. Optionally set an **Output Alias** (defaults to the related type's short name).
+5. Enable **Include In Output** to include the matched related entities in the output DTO.
+6. Enable **Require Match (Inner Join)** to exclude primary rows with no matching related rows.
+7. **Save** the step — the output type is generated automatically.
+
+The step outputs an array of objects with:
+- `Source` — the primary entity.
+- One array property per output join, named by the join's effective alias.
 
 ### Paging
 
-1. Set **Page Size** (e.g., `50`).
-2. Set **Sort Field** (sorting by the entity ID field is recommended for stable paging).
-3. A **PageNumber** (int) flow input is automatically added to the step — wire it from your flow.
+1. Enable **Use Paging**.
+2. Set a **Sort Field** (sorting by the entity ID field is recommended for stable pages).
+3. Wire **PageSize** (int) and **PageNumber** (int, 1-based) from your flow.
 
-## Known limitations (v1)
+## Step Reference
 
-- **Permission checking**: `RespectPermission` creates a plain query without the `vwGetFolderPerms` JOIN
-  (the platform's `FolderService.BuildSelectEntitiesAndFolderSecurity` is internal). This will be
-  addressed in a future version.
-- **Paging is in-memory for the offset**: the step fetches `(PageNumber * PageSize)` rows from the
-  database and slices in application memory. For large datasets with high page numbers, use
-  `LimitResults` as an additional bound.
-- **Chained JOIN RequireMatch**: when chained joins (SourceTable ≠ "main") use `RequireMatch = true`,
-  the filtering is approximate for the chain walk-back. Direct joins work precisely.
-- **SDK version 9.25.0**: if unavailable on NuGet, update the version to `9.26.0` in
-  `Decisions.FetchEntitiesAdvanced.csproj`.
+### Settings
 
-## Project structure
+| Setting | Default | Description |
+|---|---|---|
+| Type Name | — | The ORM entity type to query. |
+| Filters | — | Recursive AND/OR filter tree. |
+| Join Datatype | — | Zero or more join definitions. |
+| Sort Field | — | Field to order results by. Cleared automatically when Type Name changes. |
+| Sort Order | Ascending | Ascending or Descending. |
+| Limit Results | — | Maximum rows to return. Hidden when Use Paging is enabled. |
+| Use Paging | false | Enables PageSize / PageNumber step inputs. |
+| Respect Permission | true | Applies Decisions permission checks to the query. |
+| Fetch Deleted Entities | false | Includes soft-deleted rows. |
+| Fast Fetch | true | Uses the ORM fast-fetch path. |
+| Edit Copy | false | Returns editable (detached) entity copies. |
+| Read Uncommitted (NoLock) | true | Adds a NoLock hint where supported. |
+| Show Path for One Result | false | Adds a *Result* outcome for single-row results. |
+| Show Query In Output | false | Adds a *Query* string output to all outcomes. |
+
+### Dynamic Inputs
+
+| Input | Type | Condition |
+|---|---|---|
+| FolderId | String | Primary type is folder-aware. |
+| PageSize | Int | Use Paging = true. |
+| PageNumber | Int | Use Paging = true. |
+| *(filter input names)* | Varies | Each filter condition with a step-input value. |
+
+### Outcomes
+
+| Outcome | Outputs | Description |
+|---|---|---|
+| No Results | Query? | No rows matched. |
+| Results | EntityResults[], Query? | One or more rows returned. |
+| Result | EntityResult, Query? | Exactly one row; only present when *Show Path for One Result* is enabled. |
+
+## Building from Source
+
+### Prerequisites
+
+- .NET 10.0 SDK or higher
+- `CreateDecisionsModule` Global Tool (installed automatically during build)
+- Decisions Platform SDK (NuGet package: `DecisionsSDK`)
+
+### Build Steps
+
+#### On Linux/macOS:
+```bash
+chmod +x build_module.sh
+./build_module.sh
+```
+
+#### On Windows (PowerShell):
+```powershell
+.\build_module.ps1
+```
+
+#### Manual Build:
+```bash
+dotnet build build.proj
+dotnet msbuild build.proj -t:build_module
+```
+
+### Build Output
+
+The build creates `Decisions.FetchEntitiesAdvanced.zip` in the root directory. Upload it to Decisions via **System > Administration > Features**.
+
+## Project Structure
 
 ```
 Decisions.FetchEntitiesAdvanced/
 ├── Conditions/
-│   ├── ExistsPresence.cs
-│   ├── FilterCombinator.cs
-│   ├── FilterCondition.cs
-│   ├── FilterGroup.cs
-│   ├── NullBehavior.cs
-│   └── RelatedEntityFilter.cs
+│   ├── EntityRefOperator.cs       # Operator constants for entity-reference fields
+│   ├── FilterNode.cs              # Filter tree node (leaf, AND group, OR group)
+│   ├── FilterNodeType.cs          # Enum: Filter, And, Or
+│   ├── FilterValueType.cs         # Value type constants (StepInput, StringValue, …)
+│   └── ListOperator.cs            # Operator constants for collection fields
 ├── Join/
-│   └── JoinDefinition.cs
+│   ├── FieldMapping.cs            # Single join condition with UI dropdowns
+│   ├── FieldMappingValueType.cs   # Side-type constants for join conditions
+│   ├── JoinDefinition.cs          # One JOIN entry (type, conditions, alias, options)
+│   ├── JoinOperator.cs            # Operator constants (=, ≠, >, LIKE, …)
+│   └── JoinSideType.cs            # Side-type constants (Field, StringValue, IsNull, …)
 ├── ORM/
-│   └── ExistsSubqueryCondition.cs
+│   ├── ExistsSubqueryCondition.cs # WHERE EXISTS (…) ORM condition
+│   └── RawSqlWhereCondition.cs    # Raw SQL fragment ORM condition
 └── Steps/
-    └── AdvancedFetchEntitiesStep.cs
+    └── AdvancedFetchEntitiesStep.cs  # Main step implementation
 ```
+
+## Disclaimer
+
+This module is provided "as is" without warranties of any kind. Use it at your own risk. The authors, maintainers, and contributors disclaim all liability for any direct, indirect, incidental, special, or consequential damages, including data loss or service interruption, arising from the use of this software.
+
+**Important Notes:**
+- Always test in a non-production environment first.
+- This module is not officially supported by Decisions.
+
+## License
+
+[MIT](LICENSE)
