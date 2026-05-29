@@ -1,0 +1,23 @@
+{
+    "Resources": {
+        "NoComponents": true,
+        "CoreServicesDlls": [
+            "./Decisions.FetchEntitiesAdvanced/bin/Decisions.FetchEntitiesAdvanced.dll"
+        ],
+        "ReferenceDlls": null,
+        "CustomImages": [
+            "FetchEntitiesAdvanced.png"
+        ],
+        "CliDlls": null,
+        "WebPages": null,
+        "SilverlightDlls": null,
+        "AgentDlls": null,
+        "InstallScript": null,
+        "SqlScripts": null,
+        "ObjectsToImport": null,
+        "MsSqlScript": null
+    },
+    "Version": "1.0.0",
+    "ImagePath": "FetchEntitiesAdvanced.png",
+    "Description": "Advanced Fetch Entities step with mixed AND/OR filter logic, per-condition null handling, EXISTS subquery filtering, explicit JOIN-based related entity loading, and SQL paging."
+}

@@ -1,0 +1,19 @@
+# Build output
+**/bin/
+**/obj/
+
+# VS / Rider
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Module package
+*.zip
+PLAN.md
