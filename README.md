@@ -57,6 +57,8 @@ Use `%` as a wildcard character in string values:
 - `foo%` — starts with "foo"
 - `%foo%` — contains "foo"
 
+Matching is **case-insensitive** on both PostgreSQL (`ILIKE`) and SQL Server (collation-dependent, case-insensitive by default).
+
 ### Collection field filtering
 
 When a field is a child-entity list (`ORMOneToManyRelationship`), additional operators appear:

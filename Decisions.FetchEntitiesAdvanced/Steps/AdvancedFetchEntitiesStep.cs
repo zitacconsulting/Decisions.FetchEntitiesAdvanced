@@ -1096,7 +1096,10 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         JoinOperator.GreaterOrEqual => ">=",
         JoinOperator.LessThan       => "<",
         JoinOperator.LessOrEqual    => "<=",
-        JoinOperator.Like           => "LIKE",
+        // PostgreSQL: ILIKE for case-insensitive matching. SQL Server: LIKE is already
+        // case-insensitive by default on most collations.
+        JoinOperator.Like           => DynamicORM.DatabaseDriver.DatabaseType == DataBaseTypeEnum.MSSQL
+                                           ? "LIKE" : "ILIKE",
         _                           => "="
     };
 
