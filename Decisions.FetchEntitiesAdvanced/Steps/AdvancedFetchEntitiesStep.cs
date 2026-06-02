@@ -394,12 +394,6 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         foreach (var node in filterNodes ?? [])
             issues.AddRange(node.GetValidationIssues());
 
-        // Duplicate step input names across filter tree
-        var filterInputNames = new List<string>();
-        CollectAllFilterInputNames(filterNodes, filterInputNames);
-        foreach (var dup in filterInputNames.GroupBy(n => n).Where(g => g.Count() > 1).Select(g => g.Key))
-            issues.Add(new ValidationIssue(this, $"Filter input name '{dup}' is used more than once. Each step input name must be unique."));
-
         // Paging requires a sort field
         if (usePaging && string.IsNullOrWhiteSpace(SortField))
             issues.Add(new ValidationIssue(this, "Sort Field is required when Use Paging is enabled. Sorting by the entity ID field is recommended for stable paging."));
