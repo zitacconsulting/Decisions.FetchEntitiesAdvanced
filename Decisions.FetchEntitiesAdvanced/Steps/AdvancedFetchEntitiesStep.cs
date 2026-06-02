@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Reflection;
 using Decisions.FetchEntitiesAdvanced.Conditions;
 using Decisions.FetchEntitiesAdvanced.Join;
@@ -91,7 +92,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         get => joinDefinitions;
         set
         {
+            WireJoinMappingEvents(joinDefinitions, attach: false);
             joinDefinitions = value;
+            WireJoinMappingEvents(joinDefinitions, attach: true);
             UpdateJoinContext();
             UpdateFilterContext();
             OnPropertyChanged(nameof(JoinDefinitions));
@@ -106,7 +109,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         get => filterNodes;
         set
         {
+            WireFilterNodeEvents(filterNodes, attach: false);
             filterNodes = value;
+            WireFilterNodeEvents(filterNodes, attach: true);
             UpdateFilterContext();
             OnPropertyChanged(nameof(FilterNodes));
             OnPropertyChanged(nameof(InputData));
@@ -315,10 +320,14 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             var queryDesc = ShowQueryInOutput
                 ? new DataDescription(new DecisionsNativeType(typeof(string)), "Query", false, false, true)
                 : null;
+            var totalDesc = usePaging
+                ? new DataDescription(new DecisionsNativeType(typeof(long)), "TotalResults", false, false, false)
+                : null;
 
-            var noResultsData = queryDesc != null
-                ? new[] { queryDesc }
-                : Array.Empty<DataDescription>();
+            var noResultsBase = new List<DataDescription>();
+            if (queryDesc != null) noResultsBase.Add(queryDesc);
+            if (totalDesc != null) noResultsBase.Add(totalDesc);
+            var noResultsData = noResultsBase.ToArray();
 
             var primary = GetPrimaryType();
             DataDescription? resultDesc = null;
@@ -334,9 +343,12 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 resultDesc = new DataDescription(new DecisionsNativeType(primary), "EntityResults", true, false, false);
             }
 
-            var resultData = resultDesc != null
-                ? (queryDesc != null ? new[] { queryDesc, resultDesc } : new[] { resultDesc })
-                : noResultsData;
+            var resultBase = new List<DataDescription>();
+            if (queryDesc != null) resultBase.Add(queryDesc);
+            if (totalDesc != null) resultBase.Add(totalDesc);
+            if (resultDesc != null) resultBase.Add(resultDesc);
+            else resultBase.AddRange(noResultsBase);
+            var resultData = resultBase.ToArray();
 
             var outcomes = new List<OutcomeScenarioData>
             {
@@ -347,10 +359,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (ShowPathForOneResult && resultDesc != null)
             {
                 var singleDesc = new DataDescription(resultDesc.Type, "EntityResult", false, false, false);
-                var singleData = queryDesc != null
-                    ? new[] { queryDesc, singleDesc }
-                    : new[] { singleDesc };
-                outcomes.Add(new OutcomeScenarioData("Result", singleData));
+                var singleBase = new List<DataDescription>();
+                if (queryDesc != null) singleBase.Add(queryDesc);
+                if (totalDesc != null) singleBase.Add(totalDesc);
+                singleBase.Add(singleDesc);
+                outcomes.Add(new OutcomeScenarioData("Result", singleBase.ToArray()));
             }
 
             return outcomes.ToArray();
@@ -499,7 +512,6 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             {
                 int page = pgNumber < 1 ? 1 : pgNumber;
                 skip = (page - 1) * pgSize;
-                statement.MaxResultSetSize = skip.Value + pgSize;
                 fetchLimit = pgSize;
             }
         }
@@ -510,28 +522,40 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         // 7. Query string for debugging
         string queryStr = ShowQueryInOutput ? statement.GetQueryWithParametersValue() : string.Empty;
+        if (ShowQueryInOutput && skip.HasValue && fetchLimit.HasValue)
+            queryStr += $" /* PAGING: LIMIT {fetchLimit.Value} OFFSET {skip.Value} */";
 
         // 8. Execute primary query
+        // Note: CompositeSelectStatement.MaxResultSetSize combined with Distinct=true causes
+        // the ORM to return 0 results (ORM internal issue). Paging is therefore applied
+        // in-memory after a full fetch. For very large tables consider adding a dedicated
+        // sort+limit index and using LimitResults as a hard safety cap instead.
         var orm = new DynamicORM();
-        var primary = orm.Fetch(primaryType, statement, FetchDeletedEntities, !FastFetch);
+        var allEntities = orm.Fetch(primaryType, statement, FetchDeletedEntities, !FastFetch) ?? [];
 
-        if (skip.HasValue && fetchLimit.HasValue && primary != null)
+        // TotalResults is taken from the full ORM result BEFORE slicing. Using RunQueryForCount
+        // would give the wrong number because the ORM applies soft-delete and permission filters
+        // in-memory after the SQL runs — the SQL count sees all DB rows, the ORM fetch does not.
+        long? totalCount = (skip.HasValue && fetchLimit.HasValue) ? (long)allEntities.Length : null;
+
+        var primary = allEntities;
+        if (skip.HasValue && fetchLimit.HasValue)
         {
             primary = primary.Length > skip.Value
                 ? primary.Skip(skip.Value).Take(fetchLimit.Value).ToArray()
                 : [];
         }
 
-        if (EditCopy && primary != null)
+        if (EditCopy)
             for (int i = 0; i < primary.Length; i++)
                 primary[i] = primary[i].GetEditCopy();
 
-        if (primary == null || primary.Length == 0)
-            return NoResultsOutcome(data, queryStr);
+        if (primary.Length == 0)
+            return NoResultsOutcome(data, queryStr, totalCount);
 
         // 9. Filter-only mode
         if (!HasOutputJoins)
-            return BuildResultOutcome(primary, null, queryStr);
+            return BuildResultOutcome(primary, null, queryStr, totalCount);
 
         // 10. Batch-load related entities for output joins
         var tableResults = new Dictionary<string, IORMEntity[]>(StringComparer.OrdinalIgnoreCase)
@@ -646,7 +670,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         }
 
         if (primary.Length == 0)
-            return NoResultsOutcome(data, queryStr);
+            return NoResultsOutcome(data, queryStr, totalCount);
 
         // 11. Instantiate generated DTO array
         var generatedTypeName = GenerateOutputTypeName();
@@ -657,7 +681,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 "Save the step to trigger type generation, then reload the flow.");
 
         var dtoArray = BuildDtoArray(dtoType, primary, tableResults, inverseFKLookup);
-        return BuildResultOutcome(null, dtoArray, queryStr);
+        return BuildResultOutcome(null, dtoArray, queryStr, totalCount);
     }
 
     // =========================================================================
@@ -838,9 +862,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         string op = node.Operator ?? string.Empty;
 
-        string qt  = $"\"{childTable}\"";
-        string qfk = $"\"{fkField}\"";
-        string qpk = $"\"{parentPK}\"";
+        string qt  = QT(childTable);
+        string qfk = Q(fkField);
+        string qpk = Q(parentPK);
 
         if (op == FilterValueType.IsEmpty)
             return $"NOT EXISTS (SELECT 1 FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk})";
@@ -871,7 +895,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (string.IsNullOrWhiteSpace(node.SubField) || string.IsNullOrWhiteSpace(node.SubFieldOperator))
                 return null;
             var    rawAggCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
-            string qAggCol   = $"\"{rawAggCol}\"";
+            string qAggCol   = Q(rawAggCol!);
             var    aggFt     = FilterNode.GetFieldNetType(node.ElementTypeName, node.SubField);
             string? aggVal   = BuildCollectionValueExpr(node, data,
                 op is ListOperator.SumOf or ListOperator.AvgOf ? typeof(double) : aggFt);
@@ -893,7 +917,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             return null;
 
         var    rawSubCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
-        string qSubCol   = $"\"{rawSubCol}\"";
+        string qSubCol   = Q(rawSubCol!);
         var    subFt     = FilterNode.GetFieldNetType(node.ElementTypeName, node.SubField);
 
         string? valueExpr = BuildCollectionValueExpr(node, data, subFt);
@@ -908,16 +932,20 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             return $"NOT EXISTS (SELECT 1 FROM {qt} c__ WHERE {baseWhere} AND {subCond})";
 
         // FirstInList / LastInList — scalar subquery ordered by child PK
-        string qChildPK = $"\"{childAttr.GetKeyName(elementType)}\"";
+        string qChildPK = Q(childAttr.GetKeyName(elementType));
         string sortDir  = op == ListOperator.FirstInList ? "ASC" : "DESC";
         string scalarOp = OperatorToSql(node.SubFieldOperator!);
-        return $"(SELECT c__.{qSubCol} FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk} ORDER BY c__.{qChildPK} {sortDir} LIMIT 1) {scalarOp} {valueExpr}";
+        // SQL Server uses TOP 1 in the SELECT clause; PostgreSQL uses LIMIT 1 at the end.
+        bool   isMsSql     = DynamicORM.DatabaseDriver.DatabaseType == DataBaseTypeEnum.MSSQL;
+        string topClause   = isMsSql ? "TOP 1 " : "";
+        string limitClause = isMsSql ? "" : " LIMIT 1";
+        return $"(SELECT {topClause}c__.{qSubCol} FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk} ORDER BY c__.{qChildPK} {sortDir}{limitClause}) {scalarOp} {valueExpr}";
     }
 
     /// <summary>Bare entity ref field (no dot): only IS NULL / IS NOT NULL on the FK column.</summary>
     private static string? BuildEntityRefNullCheckSql(FilterNode node, string tableAlias)
     {
-        var fieldExpr = $"{tableAlias}.\"{("_" + node.FieldName)}\"";
+        var fieldExpr = $"{tableAlias}.{Q("_" + node.FieldName)}";
         if (node.Operator == FilterValueType.IsNull)    return $"{fieldExpr} IS NULL";
         if (node.Operator == FilterValueType.IsNotNull) return $"{fieldExpr} IS NOT NULL";
         return null;
@@ -946,7 +974,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         string? innerWhere = BuildEntityRefPathSql(refType, subPath, node.Operator!, node, data, "erf__", 0);
         if (innerWhere == null) return null;
 
-        return $"{tableAlias}.\"{fkCol}\" IN (SELECT erf__.\"{refPK}\" FROM \"{refTable}\" erf__ WHERE {innerWhere})";
+        return $"{tableAlias}.{Q(fkCol)} IN (SELECT erf__.{Q(refPK)} FROM {QT(refTable)} erf__ WHERE {innerWhere})";
     }
 
     private static string? BuildEntityRefSubValueExpr(FilterNode node, StepStartData data, Type? terminalFieldType)
@@ -962,9 +990,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             FilterValueType.StringValue   => $"'{(node.StringValue ?? string.Empty).Replace("'", "''")}'",
             FilterValueType.NumberValue   => (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            FilterValueType.BoolValue     => node.BoolValue ? "TRUE" : "FALSE",
+            FilterValueType.BoolValue     => SqlBool(node.BoolValue),
             FilterValueType.DateTimeValue => node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            FilterValueType.GuidValue     => string.IsNullOrWhiteSpace(node.GuidValue) ? null : $"'{node.GuidValue}'",
+            FilterValueType.GuidValue     => SafeGuidLit(node.GuidValue),
             _ => null
         };
     }
@@ -989,7 +1017,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             // Terminal: compare the primitive field directly
             var subCol = GetOrmColumnName(currentType, dotPath) ?? dotPath;
-            var expr   = $"{alias}.\"{subCol}\"";
+            var expr   = $"{alias}.{Q(subCol)}";
 
             if (node.IsUnary)
                 return node.ValueType switch
@@ -1027,7 +1055,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         string? innerWhere = BuildEntityRefPathSql(nextType, remainder, terminalOperator, node, data, nextAlias, depth + 1);
         if (innerWhere == null) return null;
 
-        return $"{alias}.\"{fkCol}\" IN (SELECT {nextAlias}.\"{nextPK}\" FROM \"{nextTable}\" {nextAlias} WHERE {innerWhere})";
+        return $"{alias}.{Q(fkCol)} IN (SELECT {nextAlias}.{Q(nextPK)} FROM {QT(nextTable)} {nextAlias} WHERE {innerWhere})";
     }
 
     private static Type? GetEntityRefSubFieldType(FilterNode node)
@@ -1050,9 +1078,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             FilterValueType.StringValue   => $"'{(node.StringValue ?? string.Empty).Replace("'", "''")}'",
             FilterValueType.NumberValue   => (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            FilterValueType.BoolValue     => node.BoolValue ? "TRUE" : "FALSE",
+            FilterValueType.BoolValue     => SqlBool(node.BoolValue),
             FilterValueType.DateTimeValue => node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            FilterValueType.GuidValue     => string.IsNullOrWhiteSpace(node.GuidValue) ? null : $"'{node.GuidValue}'",
+            FilterValueType.GuidValue     => SafeGuidLit(node.GuidValue),
             _ => null
         };
     }
@@ -1071,6 +1099,22 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         JoinOperator.Like           => "LIKE",
         _                           => "="
     };
+
+    // Q/QT quote a field or table name using the active database driver's conventions
+    // (double-quotes for PostgreSQL, square brackets for SQL Server).
+    private static string Q(string name)  => DynamicORM.DatabaseDriver.GetSafeFieldName(name);
+    private static string QT(string name) => DynamicORM.DatabaseDriver.GetSafeTableName(name, isQuoted: true);
+
+    // SQL Server stores booleans as bit (0/1); PostgreSQL uses TRUE/FALSE.
+    private static string SqlBool(bool value) =>
+        DynamicORM.DatabaseDriver.DatabaseType == DataBaseTypeEnum.MSSQL
+            ? (value ? "1" : "0")
+            : (value ? "TRUE" : "FALSE");
+
+    // Validates and embeds a GUID literal safely. Returns null if the value is not a valid GUID,
+    // which callers treat as "skip this condition" — preventing SQL injection via GUID fields.
+    private static string? SafeGuidLit(string? value) =>
+        Guid.TryParse(value, out var g) ? $"'{g:D}'" : null;
 
     private static string? BuildFilterFieldSql(
         FilterNode node,
@@ -1111,11 +1155,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 FilterValueType.NumberValue =>
                     (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
                 FilterValueType.BoolValue =>
-                    node.BoolValue ? "TRUE" : "FALSE",
+                    SqlBool(node.BoolValue),
                 FilterValueType.DateTimeValue =>
                     node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
                 FilterValueType.GuidValue =>
-                    string.IsNullOrWhiteSpace(node.GuidValue) ? null : $"'{node.GuidValue}'",
+                    SafeGuidLit(node.GuidValue),
                 _ => null
             };
         }
@@ -1138,7 +1182,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     private static string FormatFilterValue(object value, Type? fieldType)
     {
         if (fieldType == typeof(bool))
-            return Convert.ToBoolean(value) ? "TRUE" : "FALSE";
+            return SqlBool(Convert.ToBoolean(value));
         if (FilterNode.IsNumericType(fieldType))
             return Convert.ToDouble(value).ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (FilterNode.IsDateTimeType(fieldType) && value is DateTime dt)
@@ -1184,12 +1228,17 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
     private static void ApplyFolderFilter(CompositeSelectStatement stmt, Type entityType, string folderId)
     {
+        // Validate folderId is a real GUID before embedding in SQL — prevents injection
+        // if a non-GUID value reaches this point via the FolderId step input.
+        if (!Guid.TryParse(folderId, out var folderGuid)) return;
+        string safeFolderId = folderGuid.ToString("D");
+
         bool noLock = CompositeSelectStatement.NoLockReadDefault;
         string noLockHint = noLock ? " (nolock) " : string.Empty;
 
         string fieldName = entityType == typeof(Folder) ? "folder_id" : "entity_folder_id";
-        string subQuery  = $"select child_folder_id from folder_parent_xref{noLockHint} where folder_id = '{folderId}' " +
-                           $"union all select folder_id as child_folder_id from entity_folder{noLockHint} where folder_id = '{folderId}'";
+        string subQuery  = $"select child_folder_id from folder_parent_xref{noLockHint} where folder_id = '{safeFolderId}' " +
+                           $"union all select folder_id as child_folder_id from entity_folder{noLockHint} where folder_id = '{safeFolderId}'";
 
         stmt.JoinList.Add(new CompositeSelectStatement.JoinDefinition(
             CompositeSelectStatement.JoinType.InnerJoin,
@@ -1268,14 +1317,15 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
     // --- Result helpers ------------------------------------------------------
 
-    private ResultData NoResultsOutcome(StepStartData data, string query = "")
+    private ResultData NoResultsOutcome(StepStartData data, string query = "", long? totalCount = null)
     {
         var dict = new Dictionary<string, object?>();
         if (ShowQueryInOutput) dict["Query"] = query;
+        if (usePaging) dict["TotalResults"] = totalCount ?? 0L;
         return new ResultData("No Results", dict);
     }
 
-    private ResultData BuildResultOutcome(IORMEntity[]? primaryResults, Array? dtoResults, string query)
+    private ResultData BuildResultOutcome(IORMEntity[]? primaryResults, Array? dtoResults, string query, long? totalCount = null)
     {
         int count = dtoResults?.Length ?? primaryResults?.Length ?? 0;
 
@@ -1283,11 +1333,13 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             var emptyDict = new Dictionary<string, object?>();
             if (ShowQueryInOutput) emptyDict["Query"] = query;
+            if (usePaging) emptyDict["TotalResults"] = totalCount ?? 0L;
             return new ResultData("No Results", emptyDict);
         }
 
         var dict = new Dictionary<string, object?>();
         if (ShowQueryInOutput) dict["Query"] = query;
+        if (usePaging) dict["TotalResults"] = totalCount ?? (long)count;
 
         if (ShowPathForOneResult && count == 1)
         {
@@ -1508,7 +1560,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             .Select(id => $"'{id!.Replace("'", "''")}'"));
         if (string.IsNullOrWhiteSpace(idList)) return result;
 
-        var sql = $"SELECT \"{pkName}\", \"{columnName}\" FROM \"{tableName}\" WHERE \"{pkName}\" IN ({idList})";
+        var sql = $"SELECT {Q(pkName)}, {Q(columnName)} FROM {QT(tableName)} WHERE {Q(pkName)} IN ({idList})";
         try
         {
             var ds = new DynamicORM().RunQuery(sql);
@@ -1594,7 +1646,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     {
         if (string.IsNullOrWhiteSpace(fieldName) || entityType == null) return null;
         var col = GetOrmColumnName(entityType, fieldName) ?? fieldName;
-        return $"{alias}.\"{col}\"";
+        return $"{alias}.{Q(col!)}";
     }
 
     private static string? ResolveMappingExpr(
@@ -1606,9 +1658,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             JoinSideType.Field         => ResolveMappingExprField(fieldName, entityType, alias),
             JoinSideType.StringValue   => $"'{(stringValue ?? string.Empty).Replace("'", "''")}'",
             JoinSideType.NumberValue   => (numberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            JoinSideType.BoolValue     => boolValue ? "TRUE" : "FALSE",
+            JoinSideType.BoolValue     => SqlBool(boolValue),
             JoinSideType.DateTimeValue => dateTimeValue == null ? null : $"'{dateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            JoinSideType.GuidValue     => string.IsNullOrWhiteSpace(guidValue) ? null : $"'{guidValue}'",
+            JoinSideType.GuidValue     => SafeGuidLit(guidValue),
             _ => null
         };
     }
@@ -1649,11 +1701,59 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             JoinSideType.StringValue   => $"'{rawValue.ToString()?.Replace("'", "''") ?? string.Empty}'",
             JoinSideType.NumberValue   => Convert.ToDouble(rawValue).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            JoinSideType.BoolValue     => Convert.ToBoolean(rawValue) ? "TRUE" : "FALSE",
+            JoinSideType.BoolValue     => SqlBool(Convert.ToBoolean(rawValue)),
             JoinSideType.DateTimeValue => rawValue is DateTime dt ? $"'{dt:yyyy-MM-dd HH:mm:ss}'" : null,
-            JoinSideType.GuidValue     => $"'{rawValue}'",
+            JoinSideType.GuidValue     => SafeGuidLit(rawValue?.ToString()),
             _ => null
         };
+    }
+
+    // --- Sub-object event wiring ---------------------------------------------
+
+    // Properties on FilterNode/FieldMapping whose changes require InputData to be refreshed.
+    private static readonly HashSet<string> InputDataTriggers = new(StringComparer.Ordinal)
+    {
+        nameof(FilterNode.InputName),
+        nameof(FilterNode.ShowStepInput),   // fires when ValueType switches to/from StepInput
+        nameof(FieldMapping.JoinInputName),
+        nameof(FieldMapping.SourceInputName),
+        nameof(FieldMapping.ShowJoinInputName),   // fires when JoinUseStepInput toggles
+        nameof(FieldMapping.ShowSourceInputName), // fires when SourceUseStepInput toggles
+    };
+
+    private void WireFilterNodeEvents(FilterNode[]? nodes, bool attach)
+    {
+        foreach (var node in nodes ?? [])
+        {
+            if (attach) node.PropertyChanged += OnSubObjectPropertyChanged;
+            else        node.PropertyChanged -= OnSubObjectPropertyChanged;
+            WireFilterNodeEvents(node.Children, attach);
+        }
+    }
+
+    private void WireJoinMappingEvents(JoinDefinition[]? joins, bool attach)
+    {
+        foreach (var join in joins ?? [])
+        foreach (var mapping in join.FieldMappings ?? [])
+        {
+            if (attach) mapping.PropertyChanged += OnSubObjectPropertyChanged;
+            else        mapping.PropertyChanged -= OnSubObjectPropertyChanged;
+        }
+    }
+
+    private void OnSubObjectPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(FilterNode.Children))
+        {
+            // Children array replaced — rewire the full tree so new children are subscribed.
+            WireFilterNodeEvents(filterNodes, attach: false);
+            WireFilterNodeEvents(filterNodes, attach: true);
+            OnPropertyChanged(nameof(InputData));
+        }
+        else if (InputDataTriggers.Contains(e.PropertyName ?? ""))
+        {
+            OnPropertyChanged(nameof(InputData));
+        }
     }
 
     // --- Context updaters ----------------------------------------------------

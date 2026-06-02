@@ -122,9 +122,11 @@ The step outputs an array of objects with:
 
 | Outcome | Outputs | Description |
 |---|---|---|
-| No Results | Query? | No rows matched. |
-| Results | EntityResults[], Query? | One or more rows returned. |
-| Result | EntityResult, Query? | Exactly one row; only present when *Show Path for One Result* is enabled. |
+| No Results | Query?, TotalResults? | No rows matched. |
+| Results | EntityResults[], Query?, TotalResults? | One or more rows returned. |
+| Result | EntityResult, Query?, TotalResults? | Exactly one row; only present when *Show Path for One Result* is enabled. |
+
+> **TotalResults** (`Long`) is only present when *Use Paging* is enabled. It is the count of all matching rows across all pages — use it to calculate total pages: `CEIL(TotalResults / PageSize)`.
 
 ## Building from Source
 

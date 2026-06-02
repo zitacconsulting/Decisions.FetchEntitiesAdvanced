@@ -146,7 +146,7 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     public string? JoinInputName
     {
         get => joinInputName;
-        set => joinInputName = value;
+        set { joinInputName = value; Notify(nameof(JoinInputName)); }
     }
 
     [WritableValue]
@@ -265,7 +265,7 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     public string? SourceInputName
     {
         get => sourceInputName;
-        set => sourceInputName = value;
+        set { sourceInputName = value; Notify(nameof(SourceInputName)); }
     }
 
     [WritableValue]
