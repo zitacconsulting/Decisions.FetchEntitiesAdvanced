@@ -463,7 +463,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             ?? throw new InvalidOperationException($"Primary type '{TypeName}' could not be resolved.");
 
         // 1. Build base SELECT statement
-        var statement = BuildBaseStatement(primaryType);
+        var statement = BuildBaseStatement(primaryType, respectPermission: RespectPermission);
         statement.NoLock = CompositeSelectStatement.NoLockReadDefault && ReadUncommitted;
         statement.Distinct = true;
 
@@ -693,14 +693,29 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
     // --- Statement builder ---------------------------------------------------
 
-    private static CompositeSelectStatement BuildBaseStatement(Type entityType)
+    private static CompositeSelectStatement BuildBaseStatement(Type entityType, bool respectPermission = false)
     {
         var tableName = ORMEntityAttribute.Of(entityType)?.GetTableName(entityType)
             ?? throw new InvalidOperationException($"No ORMEntityAttribute found on type '{entityType.FullName}'.");
-        return new CompositeSelectStatement(new CompositeSelectStatement.TableDefinition(tableName, MAIN_ALIAS)
+
+        var stmt = new CompositeSelectStatement(new CompositeSelectStatement.TableDefinition(tableName, MAIN_ALIAS)
         {
             AllFields = true
         });
+
+        // For folder-aware entity types, apply folder-level permission filtering when requested.
+        // BuildStatementForEntitiesWithPermission adds JOINs to vwGetFolderPerms/entity_folder
+        // and handles the admin bypass itself — admins get the plain statement unchanged.
+        if (respectPermission && typeof(AbstractFolderEntity).IsAssignableFrom(entityType))
+        {
+            FolderService.BuildStatementForEntitiesWithPermission(
+                null, FolderPermission.CanView,
+                CompositeSelectStatement.JoinType.InnerJoin,
+                stmt, tableName, MAIN_ALIAS,
+                includeHidden: true);
+        }
+
+        return stmt;
     }
 
     // --- Filter tree SQL builder ---------------------------------------------
@@ -1169,17 +1184,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         if (valueExpr == null) return null;
 
-        return node.Operator switch
-        {
-            JoinOperator.Equal          => $"{fieldExpr} = {valueExpr}",
-            JoinOperator.NotEqual       => $"{fieldExpr} <> {valueExpr}",
-            JoinOperator.GreaterThan    => $"{fieldExpr} > {valueExpr}",
-            JoinOperator.GreaterOrEqual => $"{fieldExpr} >= {valueExpr}",
-            JoinOperator.LessThan       => $"{fieldExpr} < {valueExpr}",
-            JoinOperator.LessOrEqual    => $"{fieldExpr} <= {valueExpr}",
-            JoinOperator.Like           => $"{fieldExpr} LIKE {valueExpr}",
-            _                           => $"{fieldExpr} = {valueExpr}"
-        };
+        return ApplyOperator(fieldExpr, node.Operator ?? JoinOperator.Equal, valueExpr);
     }
 
     private static string FormatFilterValue(object value, Type? fieldType)
@@ -1630,17 +1635,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
             if (leftExpr == null || rightExpr == null) continue;
 
-            conditions.Add(m.Operator switch
-            {
-                JoinOperator.Equal          => $"{leftExpr} = {rightExpr}",
-                JoinOperator.NotEqual       => $"{leftExpr} <> {rightExpr}",
-                JoinOperator.GreaterThan    => $"{leftExpr} > {rightExpr}",
-                JoinOperator.GreaterOrEqual => $"{leftExpr} >= {rightExpr}",
-                JoinOperator.LessThan       => $"{leftExpr} < {rightExpr}",
-                JoinOperator.LessOrEqual    => $"{leftExpr} <= {rightExpr}",
-                JoinOperator.Like           => $"{leftExpr} LIKE {rightExpr}",
-                _                           => $"{leftExpr} = {rightExpr}"
-            });
+            conditions.Add(ApplyOperator(leftExpr, m.Operator ?? JoinOperator.Equal, rightExpr));
         }
         return conditions;
     }
