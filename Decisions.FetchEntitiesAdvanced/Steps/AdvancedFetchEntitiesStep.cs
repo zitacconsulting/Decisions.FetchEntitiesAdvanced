@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Reflection;
+using Decisions.FetchEntitiesAdvanced;
 using Decisions.FetchEntitiesAdvanced.Conditions;
 using Decisions.FetchEntitiesAdvanced.Join;
 using Decisions.FetchEntitiesAdvanced.ORM;
@@ -79,6 +80,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             OnPropertyChanged(nameof(TypeName));
             OnPropertyChanged(nameof(SortField));
             OnPropertyChanged(nameof(InputData));
+            ClearFlowStepCache();
             OnPropertyChanged(nameof(OutcomeScenarios));
             OnPropertyChanged(nameof(PrimaryEntityFieldNames));
             UpdateJoinContext();
@@ -99,6 +101,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             UpdateFilterContext();
             OnPropertyChanged(nameof(JoinDefinitions));
             OnPropertyChanged(nameof(InputData));
+            ClearFlowStepCache();
             OnPropertyChanged(nameof(OutcomeScenarios));
         }
     }
@@ -151,6 +154,8 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             OnPropertyChanged(nameof(UsePaging));
             OnPropertyChanged(nameof(LimitResults));
             OnPropertyChanged(nameof(InputData));
+            ClearFlowStepCache();
+            OnPropertyChanged(nameof(OutcomeScenarios));
         }
     }
 
@@ -176,7 +181,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         set { fetchDeletedEntities = value; OnPropertyChanged(nameof(FetchDeletedEntities)); }
     }
 
-    [PropertyClassification(1, "Fast Fetch", new[] { "Modify Fetch Behavior" })]
+    [PropertyClassification(1, "Fast Fetch (Read-Only Mode)", new[] { "Modify Fetch Behavior" })]
     public bool FastFetch
     {
         get => fastFetch;
@@ -205,14 +210,14 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     public bool ShowPathForOneResult
     {
         get => showPathForOneResult;
-        set { showPathForOneResult = value; OnPropertyChanged(nameof(ShowPathForOneResult)); OnPropertyChanged(nameof(OutcomeScenarios)); }
+        set { showPathForOneResult = value; OnPropertyChanged(nameof(ShowPathForOneResult)); ClearFlowStepCache(); OnPropertyChanged(nameof(OutcomeScenarios)); }
     }
 
     [PropertyClassification(1, "Show Query In Output", new[] { "Modify Outputs" })]
     public bool ShowQueryInOutput
     {
         get => showQueryInOutput;
-        set { showQueryInOutput = value; OnPropertyChanged(nameof(ShowQueryInOutput)); OnPropertyChanged(nameof(OutcomeScenarios)); }
+        set { showQueryInOutput = value; OnPropertyChanged(nameof(ShowQueryInOutput)); ClearFlowStepCache(); OnPropertyChanged(nameof(OutcomeScenarios)); }
     }
 
     // -------------------------------------------------------------------------
@@ -295,11 +300,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                     if (node.IsCollectionField)
                         ft = FilterNode.CountOperators.Contains(node.Operator ?? string.Empty)
                             ? typeof(double)  // COUNT(*) is always numeric
-                            : FilterNode.GetFieldNetType(node.ElementTypeName, node.SubField);
+                            : OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
                     else if (node.IsEntityRefField && node.FieldName?.Contains('.') == true)
                         ft = GetEntityRefSubFieldType(node);
                     else
-                        ft = FilterNode.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
+                        ft = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
                     inputs.Add(new DataDescription(
                         new DecisionsNativeType(FilterInputType(ft)),
                         node.InputName!, false, false, false));
@@ -343,17 +348,23 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 resultDesc = new DataDescription(new DecisionsNativeType(primary), "EntityResults", true, false, false);
             }
 
-            var resultBase = new List<DataDescription>();
-            if (queryDesc != null) resultBase.Add(queryDesc);
-            if (totalDesc != null) resultBase.Add(totalDesc);
-            if (resultDesc != null) resultBase.Add(resultDesc);
-            else resultBase.AddRange(noResultsBase);
-            var resultData = resultBase.ToArray();
+            DataDescription[] resultData;
+            if (resultDesc != null)
+            {
+                var resultBase = new List<DataDescription>();
+                if (queryDesc != null) resultBase.Add(queryDesc);
+                if (totalDesc != null) resultBase.Add(totalDesc);
+                resultBase.Add(resultDesc);
+                resultData = resultBase.ToArray();
+            }
+            else
+            {
+                resultData = noResultsData;
+            }
 
             var outcomes = new List<OutcomeScenarioData>
             {
                 new OutcomeScenarioData("No Results", noResultsData),
-                new OutcomeScenarioData("Results", resultData)
             };
 
             if (ShowPathForOneResult && resultDesc != null)
@@ -366,6 +377,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 outcomes.Add(new OutcomeScenarioData("Result", singleBase.ToArray()));
             }
 
+            outcomes.Add(new OutcomeScenarioData("Results", resultData));
             return outcomes.ToArray();
         }
     }
@@ -437,15 +449,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return issues.ToArray();
     }
 
-    private static void CollectAllFilterInputNames(FilterNode[]? nodes, List<string> names)
-    {
-        foreach (var node in nodes ?? [])
-        {
-            if (node.IsFilterNode && node.IsStepInput && !string.IsNullOrWhiteSpace(node.InputName))
-                names.Add(node.InputName!);
-            CollectAllFilterInputNames(node.Children, names);
-        }
-    }
+
 
     // -------------------------------------------------------------------------
     // ISyncStep.Run
@@ -685,6 +689,14 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     private Type? GetPrimaryType() =>
         string.IsNullOrWhiteSpace(typeName) ? null : TypeUtilities.FindTypeByFullName(typeName);
 
+    // FlowStep.outcomeScenariosCache is internal and only cleared via FlowStep.ClearCaches() (also internal).
+    // CreateDataStep (same framework assembly) calls FlowStep?.ClearCaches() directly; we must use reflection.
+    // Without this, FlowStep returns stale cached outcomes after ShowPathForOneResult / ShowQueryInOutput toggle.
+    private void ClearFlowStepCache() =>
+        FlowStep?.GetType()
+            .GetMethod("ClearCaches", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.Invoke(FlowStep, null);
+
     // --- Statement builder ---------------------------------------------------
 
     private static CompositeSelectStatement BuildBaseStatement(Type entityType, bool respectPermission = false)
@@ -772,7 +784,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             || string.Equals(sourceTable, primaryType.Name, StringComparison.OrdinalIgnoreCase)
             || string.Equals(sourceTable, MAIN_ALIAS, StringComparison.OrdinalIgnoreCase))
         {
-            var fieldType = FilterNode.GetFieldNetType(primaryType.FullName, node.FieldName);
+            var fieldType = OrmFieldHelper.GetFieldNetType(primaryType.FullName, node.FieldName);
             if (fieldType != null && FilterNode.IsORMCollectionType(fieldType, out var elemType) && elemType != null)
                 return BuildCollectionFilterSql(node, data, primaryType, MAIN_ALIAS, elemType);
             if (node.IsEntityRefField)
@@ -807,7 +819,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         if (filterCond == null) return null;
 
         var allConds = onConditions.Append(filterCond);
-        return $"EXISTS (SELECT 1 FROM {relatedTable} {fltAlias} WHERE {string.Join(" AND ", allConds)})";
+        return $"EXISTS (SELECT 1 FROM {QT(relatedTable)} {fltAlias} WHERE {string.Join(" AND ", allConds)})";
     }
 
     // --- Collection filter SQL -----------------------------------------------
@@ -838,6 +850,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
                     try
                     {
+                        if (key.Item1.GetConstructor(Type.EmptyTypes) == null) continue;
                         var inst = Activator.CreateInstance(key.Item1);
                         var rel  = f.GetValue(inst);
                         if (rel == null) continue;
@@ -905,7 +918,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 return null;
             var    rawAggCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
             string qAggCol   = Q(rawAggCol!);
-            var    aggFt     = FilterNode.GetFieldNetType(node.ElementTypeName, node.SubField);
+            var    aggFt     = OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
             string? aggVal   = BuildCollectionValueExpr(node, data,
                 op is ListOperator.SumOf or ListOperator.AvgOf ? typeof(double) : aggFt);
             if (aggVal == null) return null;
@@ -927,7 +940,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         var    rawSubCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
         string qSubCol   = Q(rawSubCol!);
-        var    subFt     = FilterNode.GetFieldNetType(node.ElementTypeName, node.SubField);
+        var    subFt     = OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
 
         string? valueExpr = BuildCollectionValueExpr(node, data, subFt);
         if (valueExpr == null) return null;
@@ -970,7 +983,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         string entityRefField = node.FieldName[..dot];
         string subPath        = node.FieldName[(dot + 1)..];
 
-        var refType = FilterNode.GetFieldNetType(primaryType.FullName, entityRefField);
+        var refType = OrmFieldHelper.GetFieldNetType(primaryType.FullName, entityRefField);
         if (refType == null) return null;
 
         var refAttr = ORMEntityAttribute.Of(refType);
@@ -1040,7 +1053,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                     _ => null
                 };
 
-            var terminalFt    = FilterNode.GetFieldNetType(currentType.FullName, dotPath);
+            var terminalFt    = OrmFieldHelper.GetFieldNetType(currentType.FullName, dotPath);
             string? valueExpr = BuildEntityRefSubValueExpr(node, data, terminalFt);
             if (valueExpr == null) return null;
             return ApplyOperator(expr, terminalOperator, valueExpr);
@@ -1050,7 +1063,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         string navField  = dotPath[..dot];
         string remainder = dotPath[(dot + 1)..];
 
-        var nextType = FilterNode.GetFieldNetType(currentType.FullName, navField);
+        var nextType = OrmFieldHelper.GetFieldNetType(currentType.FullName, navField);
         if (nextType == null) return null;
 
         var nextAttr = ORMEntityAttribute.Of(nextType);
@@ -1112,9 +1125,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         _                           => "="
     };
 
-    // Q/QT quote a field or table name using the active database driver's conventions
-    // (double-quotes for PostgreSQL, square brackets for SQL Server).
-    private static string Q(string name)  => DynamicORM.DatabaseDriver.GetSafeFieldName(name);
+    // Q  — wraps a column/field name in the driver's quote characters (PostgreSQL: "name", SQL Server: [name]).
+    // QT — wraps a table name. Both require isQuoted:true; the default (false) is a no-op passthrough.
+    private static string Q(string name)  => DynamicORM.DatabaseDriver.GetSafeFieldName(name, isQuoted: true);
     private static string QT(string name) => DynamicORM.DatabaseDriver.GetSafeTableName(name, isQuoted: true);
 
     // SQL Server stores booleans as bit (0/1); PostgreSQL uses TRUE/FALSE.
@@ -1135,7 +1148,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         string tableAlias)
     {
         var colName   = GetOrmColumnName(entityType, node.FieldName!) ?? node.FieldName;
-        var fieldExpr = $"{tableAlias}.{colName}";
+        var fieldExpr = $"{tableAlias}.{Q(colName!)}";
 
         if (node.IsUnary)
             return node.ValueType switch
@@ -1155,7 +1168,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (string.IsNullOrWhiteSpace(node.InputName)) return null;
             data.Data.TryGetValue(node.InputName!, out var raw);
             if (raw == null) return null; // null input → skip this filter
-            var ft = FilterNode.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
+            var ft = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
             valueExpr = FormatFilterValue(raw, ft);
         }
         else
@@ -1185,9 +1198,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     {
         if (fieldType == typeof(bool))
             return SqlBool(Convert.ToBoolean(value));
-        if (FilterNode.IsNumericType(fieldType))
+        if (OrmFieldHelper.IsNumericType(fieldType))
             return Convert.ToDouble(value).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (FilterNode.IsDateTimeType(fieldType) && value is DateTime dt)
+        if (OrmFieldHelper.IsDateTimeType(fieldType) && value is DateTime dt)
             return $"'{dt:yyyy-MM-dd HH:mm:ss}'";
         if (fieldType == typeof(Guid))
             return $"'{value}'";
@@ -1679,8 +1692,8 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     private static Type FilterInputType(Type? fieldType)
     {
         if (fieldType == typeof(bool))               return typeof(bool);
-        if (FilterNode.IsNumericType(fieldType))     return typeof(double);
-        if (FilterNode.IsDateTimeType(fieldType))    return typeof(DateTime);
+        if (OrmFieldHelper.IsNumericType(fieldType))     return typeof(double);
+        if (OrmFieldHelper.IsDateTimeType(fieldType))    return typeof(DateTime);
         return typeof(string);
     }
 

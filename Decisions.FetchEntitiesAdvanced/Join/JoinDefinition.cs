@@ -108,7 +108,6 @@ public class JoinDefinition : IValidationSource
     /// Automatically hidden and treated as <c>false</c> when this is a chained join
     /// (Source is not the primary entity).
     /// </summary>
-    [WritableValue]
     [PropertyClassification(6, "Include In Output", new[] { "Join" })]
     [BooleanPropertyHidden(nameof(IsChainedJoin), true)]
     public bool IncludeInOutput

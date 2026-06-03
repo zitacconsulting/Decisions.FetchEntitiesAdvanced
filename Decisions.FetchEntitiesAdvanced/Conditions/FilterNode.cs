@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.Serialization;
+using Decisions.FetchEntitiesAdvanced;
 using DecisionsFramework;
 using DecisionsFramework.Data.ORMapper;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -126,7 +127,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     // Type — always visible
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(0, "Type", new[] { "Details" })]
     [SelectStringEditor(nameof(AvailableNodeTypes), SelectStringEditorType.DropdownList, false)]
     public string NodeType
@@ -148,7 +148,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     // Leaf (Filter) properties
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(1, "Source Table", new[] { "Details" })]
     [SelectStringEditor("AvailableTables", SelectStringEditorType.DropdownList, true)]
     [BooleanPropertyHidden(nameof(IsFilterNode), false)]
@@ -178,7 +177,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(2, "Field", new[] { "Details" })]
     [SelectStringEditor("AvailableFields", SelectStringEditorType.DropdownList, true)]
     [BooleanPropertyHidden(nameof(IsFilterNode), false)]
@@ -196,7 +194,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 {
                     // Dot-path (e.g. "SubtypeData.SomeField"): entity ref if first segment resolves to one
                     var firstSeg = value[..value.IndexOf('.')];
-                    var ft = GetFieldNetType(selectedTypeFullName, firstSeg);
+                    var ft = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, firstSeg);
                     var baseType = ft != null ? (Nullable.GetUnderlyingType(ft) ?? ft) : null;
                     if (baseType != null && !baseType.IsArray && !baseType.IsGenericType
                         && (typeof(IORMEntity).IsAssignableFrom(baseType) || ORMEntityAttribute.Of(baseType) != null))
@@ -204,7 +202,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 }
                 else
                 {
-                    var ft = GetFieldNetType(selectedTypeFullName, value);
+                    var ft = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, value);
                     if (ft != null && IsORMCollectionType(ft, out var et) && et != null)
                         newElemType = et.FullName;
                     else
@@ -263,7 +261,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { }
     }
 
-    [WritableValue]
     [PropertyClassification(4, "Operator", new[] { "Details" })]
     [SelectStringEditor("AvailableOperators", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(ShowOperator), false)]
@@ -299,7 +296,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { }
     }
 
-    [WritableValue]
     [PropertyClassification(6, "Sub Field", new[] { "Details" })]
     [SelectStringEditor("AvailableSubFields", SelectStringEditorType.DropdownList, true)]
     [BooleanPropertyHidden(nameof(ShowSubField), false)]
@@ -321,7 +317,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(7, "Sub Field Operator", new[] { "Details" })]
     [SelectStringEditor("AvailableSubFieldOperators", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(ShowSubFieldOperator), false)]
@@ -338,7 +333,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(8, "Value Type", new[] { "Details" })]
     [SelectStringEditor("AvailableValueTypes", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(ShowValueType), false)]
@@ -359,7 +353,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(9, "Input Name", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowStepInput), false)]
     public string? InputName
@@ -368,7 +361,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { inputName = value; Notify(nameof(InputName)); }
     }
 
-    [WritableValue]
     [PropertyClassification(10, "String Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowStringValue), false)]
     public string? StringValue
@@ -377,7 +369,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { stringValue = value; Notify(nameof(StringValue)); }
     }
 
-    [WritableValue]
     [PropertyClassification(11, "Number Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowNumberValue), false)]
     public double? NumberValue
@@ -386,7 +377,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { numberValue = value; Notify(nameof(NumberValue)); }
     }
 
-    [WritableValue]
     [PropertyClassification(12, "Bool Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowBoolValue), false)]
     public bool BoolValue
@@ -395,7 +385,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { boolValue = value; Notify(nameof(BoolValue)); }
     }
 
-    [WritableValue]
     [PropertyClassification(13, "Date/Time Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowDateTimeValue), false)]
     public DateTime? DateTimeValue
@@ -404,7 +393,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { dateTimeValue = value; Notify(nameof(DateTimeValue)); }
     }
 
-    [WritableValue]
     [PropertyClassification(14, "Guid Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowGuidValue), false)]
     public string? GuidValue
@@ -417,7 +405,6 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     // Composite (And / Or) property
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(15, "Conditions", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(IsFilterNode), true)]
     public FilterNode[]? Children
@@ -460,7 +447,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             if (!IsFilterNode || string.IsNullOrWhiteSpace(fieldName) || string.IsNullOrWhiteSpace(selectedTypeFullName))
                 return false;
             if (IsCollectionField || isEntityRefField) return false;
-            var ft = GetFieldNetType(selectedTypeFullName, fieldName);
+            var ft = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
             if (ft == null) return false;
             if (!ft.IsArray && (!ft.IsGenericType || (
                     ft.GetGenericTypeDefinition() != typeof(List<>) &&
@@ -533,7 +520,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 DataUtilities.GetDataMemberAccessorsForClass(type, cache: true, publicOnly: false)
                     .Where(a =>
                     {
-                        var accessorType = GetAccessorNetType(a);
+                        var accessorType = OrmFieldHelper.GetAccessorNetType(a);
 
                         // Single entity reference (ORMRelationship<T>): included regardless of ORM attribute
                         // because the FK column (_PropName) can still be compared.
@@ -555,7 +542,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             // These allow filtering on nested types without a separate Sub Field picker.
             foreach (var a in DataUtilities.GetDataMemberAccessorsForClass(type, cache: true, publicOnly: false))
             {
-                var at = GetAccessorNetType(a);
+                var at = OrmFieldHelper.GetAccessorNetType(a);
                 if (at == null) continue;
                 var baseType = Nullable.GetUnderlyingType(at) ?? at;
                 if (baseType.IsArray || baseType.IsGenericType) continue;
@@ -600,7 +587,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                         if (ORMFieldAttribute.Of(a) == null
                             && a.Target?.GetCustomAttribute<ORMPrimaryKeyFieldAttribute>() == null)
                             return false;
-                        return !numericOnly || IsNumericType(GetAccessorNetType(a));
+                        return !numericOnly || OrmFieldHelper.IsNumericType(OrmFieldHelper.GetAccessorNetType(a));
                     })
                     .Select(a => a.Name)
                     .OrderBy(n => n)
@@ -610,7 +597,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             if (isEntityRefField && !string.IsNullOrWhiteSpace(fieldName))
             {
                 // Entity ref: recursively enumerate all primitive fields reachable through entity ref chains
-                var refType = GetFieldNetType(selectedTypeFullName, fieldName);
+                var refType = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
                 if (refType == null) return [];
                 return GetSubFieldPaths(refType, string.Empty, 5, new HashSet<string>())
                     .OrderBy(p => p)
@@ -637,7 +624,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                     var ft = primaryTyp != null ? ResolveEntityRefPathTerminalType(primaryTyp, fieldName) : null;
                     if (ft == typeof(bool) || ft == typeof(Guid))
                         return [JoinOperator.Equal, JoinOperator.NotEqual];
-                    if (IsNumericType(ft) || IsDateTimeType(ft))
+                    if (OrmFieldHelper.IsNumericType(ft) || OrmFieldHelper.IsDateTimeType(ft))
                         return [JoinOperator.Equal, JoinOperator.NotEqual,
                                 JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
                                 JoinOperator.LessThan,    JoinOperator.LessOrEqual];
@@ -647,10 +634,10 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 return [FilterValueType.IsNull, FilterValueType.IsNotNull];
             }
             if (IsUnary) return [];
-            var fieldType = GetFieldNetType(selectedTypeFullName, fieldName);
+            var fieldType = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
             if (fieldType == typeof(bool) || fieldType == typeof(Guid))
                 return [JoinOperator.Equal, JoinOperator.NotEqual];
-            if (IsNumericType(fieldType) || IsDateTimeType(fieldType))
+            if (OrmFieldHelper.IsNumericType(fieldType) || OrmFieldHelper.IsDateTimeType(fieldType))
                 return [JoinOperator.Equal, JoinOperator.NotEqual,
                         JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
                         JoinOperator.LessThan,    JoinOperator.LessOrEqual];
@@ -667,10 +654,10 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
 
             Type? ft;
             if (!string.IsNullOrWhiteSpace(elementTypeName))
-                ft = GetFieldNetType(elementTypeName, subField);
+                ft = OrmFieldHelper.GetFieldNetType(elementTypeName, subField);
             else if (isEntityRefField && !string.IsNullOrWhiteSpace(fieldName))
             {
-                var refType = GetFieldNetType(selectedTypeFullName, fieldName);
+                var refType = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
                 ft = refType != null ? ResolveEntityRefPathTerminalType(refType, subField) : null;
             }
             else
@@ -678,7 +665,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
 
             if (ft == typeof(bool) || ft == typeof(Guid))
                 return [JoinOperator.Equal, JoinOperator.NotEqual];
-            if (IsNumericType(ft) || IsDateTimeType(ft))
+            if (OrmFieldHelper.IsNumericType(ft) || OrmFieldHelper.IsDateTimeType(ft))
                 return [JoinOperator.Equal, JoinOperator.NotEqual,
                         JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
                         JoinOperator.LessThan,    JoinOperator.LessOrEqual];
@@ -701,7 +688,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 if (operatorValue == ListOperator.SumOf || operatorValue == ListOperator.AvgOf)
                     return [FilterValueType.StepInput, FilterValueType.NumberValue];
                 // Min/Max, Contains, First/Last: based on the sub-field type
-                var ft = GetFieldNetType(elementTypeName, subField);
+                var ft = OrmFieldHelper.GetFieldNetType(elementTypeName, subField);
                 return BuildValueTypeList(ft, subFieldOperator);
             }
             if (IsEntityRefField)
@@ -717,7 +704,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             // treat as string so the user can filter against the serialized representation.
             if (IsSerializedField)
                 return BuildValueTypeList(typeof(string), operatorValue);
-            var fieldType = GetFieldNetType(selectedTypeFullName, fieldName);
+            var fieldType = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
             return BuildValueTypeList(fieldType, operatorValue);
         }
     }
@@ -726,9 +713,9 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     {
         var result = new List<string> { FilterValueType.StepInput };
         if (ft == null || ft == typeof(string))  result.Add(FilterValueType.StringValue);
-        if (ft == null || IsNumericType(ft))      result.Add(FilterValueType.NumberValue);
+        if (ft == null || OrmFieldHelper.IsNumericType(ft))      result.Add(FilterValueType.NumberValue);
         if (ft == null || ft == typeof(bool))     result.Add(FilterValueType.BoolValue);
-        if (ft == null || IsDateTimeType(ft))     result.Add(FilterValueType.DateTimeValue);
+        if (ft == null || OrmFieldHelper.IsDateTimeType(ft))     result.Add(FilterValueType.DateTimeValue);
         if (ft == null || ft == typeof(Guid))     result.Add(FilterValueType.GuidValue);
         result.Add(FilterValueType.IsNull);
         result.Add(FilterValueType.IsNotNull);
@@ -764,14 +751,14 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 // Dot-path: entity ref if first segment resolves to one
                 elementTypeName = null;
                 var firstSeg = fieldName[..fieldName.IndexOf('.')];
-                var ft = GetFieldNetType(selectedTypeFullName, firstSeg);
+                var ft = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, firstSeg);
                 var baseType = ft != null ? (Nullable.GetUnderlyingType(ft) ?? ft) : null;
                 isEntityRefField = baseType != null && !baseType.IsArray && !baseType.IsGenericType
                     && (typeof(IORMEntity).IsAssignableFrom(baseType) || ORMEntityAttribute.Of(baseType) != null);
             }
             else
             {
-                var ft = GetFieldNetType(selectedTypeFullName, fieldName);
+                var ft = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
                 if (ft != null && IsORMCollectionType(ft, out var et) && et != null)
                 {
                     elementTypeName  = et.FullName;
@@ -791,7 +778,13 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             nameof(AvailableTables),     nameof(AvailableFields),
             nameof(AvailableSubFields),  nameof(AvailableOperators),
             nameof(AvailableSubFieldOperators), nameof(AvailableValueTypes),
-            nameof(IsCollectionField));
+            nameof(IsCollectionField),   nameof(IsEntityRefField),    nameof(ElementTypeName),
+            nameof(IsSerializedField),   nameof(SerializedFieldNote),
+            nameof(Operator),            nameof(ValueType),
+            nameof(ShowOperator),        nameof(ShowSubField),    nameof(ShowSubFieldOperator),
+            nameof(ShowValueType),       nameof(ShowStepInput),
+            nameof(ShowStringValue),     nameof(ShowNumberValue),
+            nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
         foreach (var child in children ?? [])
             child.PushContext(tables, typeNames);
     }
@@ -1013,7 +1006,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         if (op == JoinOperator.Like) return t == null || t == typeof(string);
         if (op is JoinOperator.GreaterThan or JoinOperator.GreaterOrEqual
                or JoinOperator.LessThan    or JoinOperator.LessOrEqual)
-            return t == null || t == typeof(string) || IsNumericType(t) || IsDateTimeType(t);
+            return t == null || t == typeof(string) || OrmFieldHelper.IsNumericType(t) || OrmFieldHelper.IsDateTimeType(t);
         return true;
     }
 
@@ -1029,43 +1022,12 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         return vt switch
         {
             FilterValueType.StringValue   => t == null || t == typeof(string),
-            FilterValueType.NumberValue   => t == null || IsNumericType(t),
+            FilterValueType.NumberValue   => t == null || OrmFieldHelper.IsNumericType(t),
             FilterValueType.BoolValue     => t == null || t == typeof(bool),
-            FilterValueType.DateTimeValue => t == null || IsDateTimeType(t),
+            FilterValueType.DateTimeValue => t == null || OrmFieldHelper.IsDateTimeType(t),
             FilterValueType.GuidValue     => t == null || t == typeof(Guid),
             _                             => true
         };
-    }
-
-    internal static Type? GetFieldNetType(string? typeName, string? fName)
-    {
-        if (string.IsNullOrWhiteSpace(typeName) || string.IsNullOrWhiteSpace(fName)) return null;
-        var type = TypeUtilities.FindTypeByFullName(typeName);
-        if (type == null) return null;
-
-        var accessor = DataUtilities.GetDataMemberAccessorsForClass(type, cache: true, publicOnly: false)
-            .FirstOrDefault(a => a.Name == fName);
-        if (accessor != null)
-        {
-            var rawType = (accessor.Target as PropertyInfo)?.PropertyType
-                       ?? (accessor.Target as FieldInfo)?.FieldType;
-            if (rawType != null) return Nullable.GetUnderlyingType(rawType) ?? rawType;
-        }
-
-        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic
-                                 | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-        for (var t = type; t != null && t != typeof(object); t = t.BaseType)
-        {
-            var prop = t.GetProperty(fName, flags)
-                    ?? t.GetProperties(flags).FirstOrDefault(p =>
-                           string.Equals(p.Name, fName, StringComparison.OrdinalIgnoreCase));
-            if (prop != null) return Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
-            var fld = t.GetField(fName, flags)
-                   ?? t.GetFields(flags).FirstOrDefault(f =>
-                          string.Equals(f.Name, fName, StringComparison.OrdinalIgnoreCase));
-            if (fld != null) return Nullable.GetUnderlyingType(fld.FieldType) ?? fld.FieldType;
-        }
-        return null;
     }
 
     /// <summary>
@@ -1078,7 +1040,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         var current = startType;
         foreach (var part in dotPath.Split('.'))
         {
-            var next = GetFieldNetType(current.FullName, part);
+            var next = OrmFieldHelper.GetFieldNetType(current.FullName, part);
             if (next == null) return null;
             current = next;
         }
@@ -1095,7 +1057,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
 
         foreach (var a in DataUtilities.GetDataMemberAccessorsForClass(refType, cache: true, publicOnly: false))
         {
-            var at = GetAccessorNetType(a);
+            var at = OrmFieldHelper.GetAccessorNetType(a);
             if (at == null) continue;
             if (IsORMCollectionType(at, out _)) continue;
 
@@ -1117,19 +1079,4 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    private static Type? GetAccessorNetType(object accessor)
-    {
-        var targetProp = accessor.GetType().GetProperty("Target");
-        var target     = targetProp?.GetValue(accessor);
-        var rawType    = (target as PropertyInfo)?.PropertyType ?? (target as FieldInfo)?.FieldType;
-        return rawType == null ? null : Nullable.GetUnderlyingType(rawType) ?? rawType;
-    }
-
-    internal static bool IsNumericType(Type? t) =>
-        t != null && (t == typeof(int)   || t == typeof(long)   || t == typeof(short)  || t == typeof(byte)  ||
-                      t == typeof(float) || t == typeof(double) || t == typeof(decimal) ||
-                      t == typeof(uint)  || t == typeof(ulong)  || t == typeof(ushort));
-
-    internal static bool IsDateTimeType(Type? t) =>
-        t != null && (t == typeof(DateTime) || t == typeof(DateTimeOffset));
 }

@@ -33,23 +33,6 @@ public class ExistsSubqueryCondition : WhereCondition
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// Single equijoin condition: <c>childJoinFieldExpr = parentFieldExpr</c>.
-    /// Used by the RelatedEntityFilter (ORMOneToManyRelationship) path.
-    /// </summary>
-    public ExistsSubqueryCondition(
-        string childTableName,
-        string childJoinFieldExpr,
-        string parentFieldExpr,
-        AbstractWhereSet? additionalConditions = null,
-        bool negate = false)
-    {
-        this.childTableName = childTableName;
-        this.joinClause = $"{childJoinFieldExpr} = {parentFieldExpr}";
-        this.additionalConditions = additionalConditions;
-        this.negate = negate;
-    }
-
-    /// <summary>
     /// Multiple join conditions from a <see cref="Decisions.FetchEntitiesAdvanced.Join.FieldMapping"/> list.
     /// All conditions are ANDed together in the subquery WHERE clause.
     /// </summary>

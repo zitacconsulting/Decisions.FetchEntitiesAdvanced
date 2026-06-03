@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.Serialization;
+using Decisions.FetchEntitiesAdvanced;
 using DecisionsFramework;
 using DecisionsFramework.Data.ORMapper;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -81,7 +82,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     // 1 Join section
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(0, "Join Value Type", new[] { "1 Join" })]
     [SelectStringEditor("AvailableJoinSideTypes", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(SourceIsUnary), true)]
@@ -107,7 +107,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(1, "Join Field", new[] { "1 Join" })]
     [SelectStringEditor("AvailableJoinFields", SelectStringEditorType.DropdownList, true)]
     [BooleanPropertyHidden(nameof(JoinFieldVisible), false)]
@@ -124,7 +123,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(2, "Use Step Input", new[] { "1 Join" })]
     [BooleanPropertyHidden(nameof(ShowJoinUseStepInput), false)]
     public bool JoinUseStepInput
@@ -140,7 +138,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(3, "Input Name", new[] { "1 Join" })]
     [BooleanPropertyHidden(nameof(ShowJoinInputName), false)]
     public string? JoinInputName
@@ -178,7 +175,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     // 2 Condition section
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(10, "Operator", new[] { "2 Condition" })]
     [SelectStringEditor("AvailableOperators", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(IsBinaryCondition), false)]
@@ -200,7 +196,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     // 3 Source section
     // -----------------------------------------------------------------------
 
-    [WritableValue]
     [PropertyClassification(20, "Source Value Type", new[] { "3 Source" })]
     [SelectStringEditor("AvailableSourceSideTypes", SelectStringEditorType.DropdownList, false)]
     [BooleanPropertyHidden(nameof(JoinIsUnary), true)]
@@ -226,7 +221,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(21, "Source Field", new[] { "3 Source" })]
     [SelectStringEditor("AvailableSourceFields", SelectStringEditorType.DropdownList, true)]
     [BooleanPropertyHidden(nameof(SourceFieldVisible), false)]
@@ -243,7 +237,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(22, "Use Step Input", new[] { "3 Source" })]
     [BooleanPropertyHidden(nameof(ShowSourceUseStepInput), false)]
     public bool SourceUseStepInput
@@ -259,7 +252,6 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         }
     }
 
-    [WritableValue]
     [PropertyClassification(23, "Input Name", new[] { "3 Source" })]
     [BooleanPropertyHidden(nameof(ShowSourceInputName), false)]
     public string? SourceInputName
@@ -545,8 +537,8 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
                 // ORMRelationship<T> fields (e.g. _Maintype) store FK strings in the DB.
                 // Navigation properties typed as IORMEntity also map to string FK columns.
                 var t = typeof(IORMRelationship).IsAssignableFrom(a.DataType) ? typeof(string)
-                      : IsEntityRefType(GetAccessorNetType(a))                ? typeof(string)
-                      : GetAccessorNetType(a);
+                      : IsEntityRefType(OrmFieldHelper.GetAccessorNetType(a))                ? typeof(string)
+                      : OrmFieldHelper.GetAccessorNetType(a);
                 return (filterType == null || IsTypeCompatible(t, filterType))
                     && FieldPassesOperatorFilter(t, filterOp);
             })
@@ -571,8 +563,8 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
                or JoinOperator.LessThan     or JoinOperator.LessOrEqual)
             return fieldType == null
                 || fieldType == typeof(string)
-                || IsNumericType(fieldType)
-                || IsDateTimeType(fieldType);
+                || OrmFieldHelper.IsNumericType(fieldType)
+                || OrmFieldHelper.IsDateTimeType(fieldType);
         return true;
     }
 
@@ -600,9 +592,9 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
             result.Add(JoinSideType.GuidValue);
         }
         else if (detected == typeof(string))   result.Add(JoinSideType.StringValue);
-        else if (IsNumericType(detected))       result.Add(JoinSideType.NumberValue);
+        else if (OrmFieldHelper.IsNumericType(detected))       result.Add(JoinSideType.NumberValue);
         else if (detected == typeof(bool))      result.Add(JoinSideType.BoolValue);
-        else if (IsDateTimeType(detected))      result.Add(JoinSideType.DateTimeValue);
+        else if (OrmFieldHelper.IsDateTimeType(detected))      result.Add(JoinSideType.DateTimeValue);
         else if (detected == typeof(Guid))      result.Add(JoinSideType.GuidValue);
         else                                    result.Add(JoinSideType.StringValue);
 
@@ -638,7 +630,7 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
             return new HashSet<string>(StringComparer.Ordinal)
                 { JoinOperator.Equal, JoinOperator.NotEqual };
 
-        if (IsNumericType(t) || IsDateTimeType(t))
+        if (OrmFieldHelper.IsNumericType(t) || OrmFieldHelper.IsDateTimeType(t))
             return new HashSet<string>(StringComparer.Ordinal)
             {
                 JoinOperator.Equal,        JoinOperator.NotEqual,
@@ -664,50 +656,9 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     private static bool IsTypeCompatible(Type? fieldType, Type? targetType)
     {
         if (fieldType == null || targetType == null) return true;
-        if (IsNumericType(fieldType)  && IsNumericType(targetType))  return true;
-        if (IsDateTimeType(fieldType) && IsDateTimeType(targetType)) return true;
+        if (OrmFieldHelper.IsNumericType(fieldType)  && OrmFieldHelper.IsNumericType(targetType))  return true;
+        if (OrmFieldHelper.IsDateTimeType(fieldType) && OrmFieldHelper.IsDateTimeType(targetType)) return true;
         return fieldType == targetType;
-    }
-
-    private static Type? GetFieldNetType(string? typeName, string? fieldName)
-    {
-        if (string.IsNullOrWhiteSpace(typeName) || string.IsNullOrWhiteSpace(fieldName)) return null;
-        var type = TypeUtilities.FindTypeByFullName(typeName);
-        if (type == null) return null;
-
-        var accessor = DataUtilities.GetDataMemberAccessorsForClass(type, cache: true, publicOnly: false)
-            .FirstOrDefault(a => a.Name == fieldName);
-        if (accessor != null)
-        {
-            var rawType = (accessor.Target as PropertyInfo)?.PropertyType
-                       ?? (accessor.Target as FieldInfo)?.FieldType;
-            if (rawType != null)
-                return Nullable.GetUnderlyingType(rawType) ?? rawType;
-        }
-
-        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic
-                                 | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-        for (var t = type; t != null && t != typeof(object); t = t.BaseType)
-        {
-            var prop = t.GetProperty(fieldName, flags)
-                    ?? t.GetProperties(flags).FirstOrDefault(p =>
-                           string.Equals(p.Name, fieldName, StringComparison.OrdinalIgnoreCase));
-            if (prop != null) return Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
-
-            var fld = t.GetField(fieldName, flags)
-                   ?? t.GetFields(flags).FirstOrDefault(f =>
-                          string.Equals(f.Name, fieldName, StringComparison.OrdinalIgnoreCase));
-            if (fld != null) return Nullable.GetUnderlyingType(fld.FieldType) ?? fld.FieldType;
-        }
-        return null;
-    }
-
-    private static Type? GetAccessorNetType(object accessor)
-    {
-        var targetProp = accessor.GetType().GetProperty("Target");
-        var target = targetProp?.GetValue(accessor);
-        var rawType = (target as PropertyInfo)?.PropertyType ?? (target as FieldInfo)?.FieldType;
-        return rawType == null ? null : Nullable.GetUnderlyingType(rawType) ?? rawType;
     }
 
     // Returns FK column names that exist in entityTypeName's table but are managed by
@@ -756,17 +707,10 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
     // Returns the effective type for join compatibility: string for entity ref / ORMRelationship fields (FK), raw type otherwise.
     private static Type? GetJoinFieldEffectiveType(string? typeName, string? fieldName)
     {
-        var t = GetFieldNetType(typeName, fieldName);
+        var t = OrmFieldHelper.GetFieldNetType(typeName, fieldName);
         if (t == null) return null;
         if (IsEntityRefType(t) || typeof(IORMRelationship).IsAssignableFrom(t)) return typeof(string);
         return t;
     }
 
-    private static bool IsNumericType(Type t) =>
-        t == typeof(int)   || t == typeof(long)    || t == typeof(short)   || t == typeof(byte)  ||
-        t == typeof(float) || t == typeof(double)  || t == typeof(decimal) ||
-        t == typeof(uint)  || t == typeof(ulong)   || t == typeof(ushort);
-
-    private static bool IsDateTimeType(Type t) =>
-        t == typeof(DateTime) || t == typeof(DateTimeOffset);
 }
