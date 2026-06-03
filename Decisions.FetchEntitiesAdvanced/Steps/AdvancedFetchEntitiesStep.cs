@@ -532,10 +532,16 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             statement.MaxResultSetSize = limitResults.Value;
         }
 
-        // 7. Query string for debugging
-        string queryStr = ShowQueryInOutput ? statement.GetQueryWithParametersValue() : string.Empty;
-        if (ShowQueryInOutput && skip.HasValue && fetchLimit.HasValue)
-            queryStr += $" /* PAGING: LIMIT {fetchLimit.Value} OFFSET {skip.Value} */";
+        // 7. Query string for debugging — accumulates primary + all join batch-load queries
+        var querySb = ShowQueryInOutput ? new StringBuilder() : null;
+        if (querySb != null)
+        {
+            var pagingNote = (skip.HasValue && fetchLimit.HasValue)
+                ? $" -- PAGING: LIMIT {fetchLimit.Value} OFFSET {skip.Value}" : string.Empty;
+            querySb.AppendLine($"-- Primary{pagingNote}");
+            querySb.Append(statement.GetQueryWithParametersValue());
+        }
+        string queryStr = string.Empty;
 
         // 8. Execute primary query
         // Note: CompositeSelectStatement.MaxResultSetSize combined with Distinct=true causes
@@ -561,6 +567,10 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         if (EditCopy)
             for (int i = 0; i < primary.Length; i++)
                 primary[i] = primary[i].GetEditCopy();
+
+        // Materialise query string for early-exit paths (no joins).
+        // For paths that include a batch-load loop the StringBuilder is updated further below.
+        queryStr = querySb?.ToString() ?? string.Empty;
 
         if (primary.Length == 0)
             return NoResultsOutcome(data, queryStr, totalCount);
@@ -669,9 +679,19 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                     relatedStmt.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(chainedExistsSql));
             }
 
+            if (querySb != null)
+            {
+                querySb.AppendLine();
+                querySb.AppendLine($"-- Join: {joinEffectiveName}");
+                querySb.Append(relatedStmt.GetQueryWithParametersValue());
+            }
+
             var related = orm.Fetch(relatedType, relatedStmt, FetchDeletedEntities, !FastFetch) ?? [];
             tableResults[joinEffectiveName] = related;
         }
+
+        // Materialise final query string now that all join queries have been appended.
+        queryStr = querySb?.ToString() ?? string.Empty;
 
         if (primary.Length == 0)
             return NoResultsOutcome(data, queryStr, totalCount);
