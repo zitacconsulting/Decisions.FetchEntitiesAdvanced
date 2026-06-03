@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Reflection;
+using System.Text;
 using Decisions.FetchEntitiesAdvanced;
 using Decisions.FetchEntitiesAdvanced.Conditions;
 using Decisions.FetchEntitiesAdvanced.Join;
@@ -436,6 +437,18 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 issues.Add(typeIssue);
         }
 
+        // Chained output joins require their parent join to also be an output join
+        foreach (var join in JoinDefinitions ?? [])
+        {
+            if (!join.IsChainedJoin || !join.IncludeInOutput) continue;
+            var parent = (JoinDefinitions ?? []).FirstOrDefault(j =>
+                string.Equals(j.EffectiveName, join.SourceTable, StringComparison.OrdinalIgnoreCase));
+            if (parent == null || !parent.IncludeInOutput)
+                issues.Add(new ValidationIssue(this,
+                    $"Join '{join.EffectiveName ?? join.RelatedTypeName ?? "unnamed"}' is set to Include In Output " +
+                    $"but its source join '{join.SourceTable}' is not. Enable Include In Output on the parent join first."));
+        }
+
         // Warn about joins that neither contribute to output nor require a match
         foreach (var join in JoinDefinitions ?? [])
         {
@@ -569,7 +582,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         foreach (var join in JoinDefinitions ?? [])
         {
-            if (!join.IncludeInOutput || join.IsChainedJoin) continue;
+            if (!join.IncludeInOutput) continue;
             if (string.IsNullOrWhiteSpace(join.RelatedTypeName)) continue;
             var joinEffectiveName = join.EffectiveName;
             if (joinEffectiveName == null) continue;
@@ -1288,8 +1301,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         Dictionary<string, IORMEntity[]> tableResults,
         Dictionary<string, Dictionary<string, object?>>? inverseFKLookup = null)
     {
-        var sourceProp = dtoType.GetProperty("Source");
-        var joinProps  = (JoinDefinitions ?? [])
+        var primaryType = GetPrimaryType();
+        var sourceProp  = primaryType != null ? dtoType.GetProperty(primaryType.Name) : null;
+        var joinProps   = (JoinDefinitions ?? [])
             .Where(j => j.IncludeInOutput && !j.IsChainedJoin && j.EffectiveName != null)
             .Select(j => (join: j, prop: dtoType.GetProperty(j.EffectiveName!)))
             .Where(x => x.prop != null)
@@ -1309,29 +1323,21 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 var relatedType = TypeUtilities.FindTypeByFullName(join.RelatedTypeName!);
                 if (relatedType == null) continue;
 
-                var f2fMappings = (join.FieldMappings ?? [])
-                    .Where(m => m.JoinValueType == JoinSideType.Field
-                             && m.SourceValueType == JoinSideType.Field
-                             && m.Operator == JoinOperator.Equal
-                             && !string.IsNullOrEmpty(m.JoinFieldName)
-                             && !string.IsNullOrEmpty(m.SourceFieldName))
-                    .ToArray();
-
                 Dictionary<string, object?>? fkMapForJoin = null;
                 inverseFKLookup?.TryGetValue(join.EffectiveName!, out fkMapForJoin);
-                var matched = relatedAll
-                    .Where(r => f2fMappings.Length == 0 || f2fMappings.All(m =>
+                var matched = FilterByF2FMappings(relatedAll, primary[i], join, fkMapForJoin);
+
+                var chainedOutputJoins = GetChainedOutputJoins(join.EffectiveName!).ToArray();
+                if (chainedOutputJoins.Length > 0)
+                {
+                    var subTypeName = SubTypeName(relatedType, chainedOutputJoins);
+                    var subDtoType  = TypeUtilities.FindTypeByFullName($"{GENERATED_TYPE_NAMESPACE}.{subTypeName}");
+                    if (subDtoType != null)
                     {
-                        var joinVal = GetOrmFieldValue(r, m.JoinFieldName!);
-                        var srcVal  = GetOrmFieldValue(primary[i], m.SourceFieldName!);
-                        if (srcVal == null && fkMapForJoin != null)
-                        {
-                            var pid = primary[i].GetPrimaryKeyValue();
-                            if (pid != null) fkMapForJoin.TryGetValue(pid, out srcVal);
-                        }
-                        return Equals(joinVal, srcVal);
-                    }))
-                    .ToArray();
+                        prop!.SetValue(dto, BuildJoinDtoArray(join, subDtoType, matched, tableResults, inverseFKLookup));
+                        continue;
+                    }
+                }
 
                 var arr = Array.CreateInstance(relatedType, matched.Length);
                 for (int j = 0; j < matched.Length; j++) arr.SetValue(matched[j], j);
@@ -1342,6 +1348,97 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Assembles an array of sub-type DTOs for a join that has chained output joins.
+    /// Each sub-type DTO holds the joined entity and its chained join results.
+    /// Handles arbitrary nesting depth recursively.
+    /// </summary>
+    private Array BuildJoinDtoArray(
+        JoinDefinition parentJoin,
+        Type subDtoType,
+        IORMEntity[] entities,
+        Dictionary<string, IORMEntity[]> tableResults,
+        Dictionary<string, Dictionary<string, object?>>? inverseFKLookup)
+    {
+        var relatedType = TypeUtilities.FindTypeByFullName(parentJoin.RelatedTypeName!);
+        var entityProp  = relatedType != null ? subDtoType.GetProperty(relatedType.Name) : null;
+
+        var chainedJoins = GetChainedOutputJoins(parentJoin.EffectiveName!)
+            .Select(j => (join: j, prop: subDtoType.GetProperty(j.EffectiveName!)))
+            .Where(x => x.prop != null)
+            .ToArray();
+
+        var result = Array.CreateInstance(subDtoType, entities.Length);
+
+        for (int i = 0; i < entities.Length; i++)
+        {
+            var entity = entities[i];
+            var dto    = Activator.CreateInstance(subDtoType)!;
+            entityProp?.SetValue(dto, entity);
+
+            foreach (var (chainedJoin, prop) in chainedJoins)
+            {
+                if (!tableResults.TryGetValue(chainedJoin.EffectiveName!, out var chainedAll)) continue;
+
+                var chainedRelatedType = TypeUtilities.FindTypeByFullName(chainedJoin.RelatedTypeName!);
+                if (chainedRelatedType == null) continue;
+
+                Dictionary<string, object?>? fkMap = null;
+                inverseFKLookup?.TryGetValue(chainedJoin.EffectiveName!, out fkMap);
+                var matched = FilterByF2FMappings(chainedAll, entity, chainedJoin, fkMap);
+
+                var deepChained = GetChainedOutputJoins(chainedJoin.EffectiveName!).ToArray();
+                if (deepChained.Length > 0)
+                {
+                    var deepSubTypeName = SubTypeName(chainedRelatedType, deepChained);
+                    var deepDtoType     = TypeUtilities.FindTypeByFullName($"{GENERATED_TYPE_NAMESPACE}.{deepSubTypeName}");
+                    if (deepDtoType != null)
+                    {
+                        prop!.SetValue(dto, BuildJoinDtoArray(chainedJoin, deepDtoType, matched, tableResults, inverseFKLookup));
+                        continue;
+                    }
+                }
+
+                var arr = Array.CreateInstance(chainedRelatedType, matched.Length);
+                for (int j = 0; j < matched.Length; j++) arr.SetValue(matched[j], j);
+                prop!.SetValue(dto, arr);
+            }
+
+            result.SetValue(dto, i);
+        }
+
+        return result;
+    }
+
+    private static IORMEntity[] FilterByF2FMappings(
+        IORMEntity[] candidates, IORMEntity sourceEntity,
+        JoinDefinition join, Dictionary<string, object?>? fkMap)
+    {
+        var f2f = (join.FieldMappings ?? [])
+            .Where(m => m.JoinValueType == JoinSideType.Field
+                     && m.SourceValueType == JoinSideType.Field
+                     && m.Operator == JoinOperator.Equal
+                     && !string.IsNullOrEmpty(m.JoinFieldName)
+                     && !string.IsNullOrEmpty(m.SourceFieldName))
+            .ToArray();
+
+        if (f2f.Length == 0) return candidates;
+
+        return candidates
+            .Where(r => f2f.All(m =>
+            {
+                var joinVal = GetOrmFieldValue(r, m.JoinFieldName!);
+                var srcVal  = GetOrmFieldValue(sourceEntity, m.SourceFieldName!);
+                if (srcVal == null && fkMap != null)
+                {
+                    var id = sourceEntity.GetPrimaryKeyValue();
+                    if (id != null) fkMap.TryGetValue(id, out srcVal);
+                }
+                return Equals(joinVal, srcVal);
+            }))
+            .ToArray();
     }
 
     // --- Result helpers ------------------------------------------------------
@@ -1441,7 +1538,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         {
             new DefinedDataTypeDataMember
             {
-                RelationshipName = "Source",
+                RelationshipName = primaryType.Name,
                 IsList = false,
                 RelatedToDataType = primaryType.FullName
             }
@@ -1455,11 +1552,23 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             var relatedType = TypeUtilities.FindTypeByFullName(join.RelatedTypeName);
             if (relatedType == null) continue;
 
+            var chainedOutputJoins = GetChainedOutputJoins(memberName).ToArray();
+            string memberTypeName;
+            if (chainedOutputJoins.Length > 0)
+            {
+                var subTypeName = EnsureSubType(memberName, relatedType, chainedOutputJoins, folderId);
+                memberTypeName = $"{GENERATED_TYPE_NAMESPACE}.{subTypeName}";
+            }
+            else
+            {
+                memberTypeName = relatedType.FullName!;
+            }
+
             members.Add(new DefinedDataTypeDataMember
             {
                 RelationshipName = memberName,
                 IsList = true,
-                RelatedToDataType = relatedType.FullName
+                RelatedToDataType = memberTypeName
             });
         }
 
@@ -1467,15 +1576,80 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         DataStructureService.AddOrUpdateDataStructure(def);
     }
 
+    /// <summary>
+    /// Recursively creates (or updates) a sub-type DefinedDataStructure for a join that has
+    /// chained output joins.  The sub-type has one non-list property named after the joined
+    /// entity's type (the entity itself) plus one list property per chained output join.
+    /// Returns the generated sub-type short name.
+    /// </summary>
+    private string EnsureSubType(string joinAlias, Type joinedType, JoinDefinition[] chainedJoins, string folderId)
+    {
+        var subTypeName = SubTypeName(joinedType, chainedJoins);
+
+        var members = new List<DefinedDataTypeDataMember>
+        {
+            new DefinedDataTypeDataMember
+            {
+                RelationshipName = joinedType.Name,
+                IsList = false,
+                RelatedToDataType = joinedType.FullName
+            }
+        };
+
+        foreach (var chainedJoin in chainedJoins)
+        {
+            var chainedAlias = chainedJoin.EffectiveName;
+            if (chainedAlias == null || string.IsNullOrWhiteSpace(chainedJoin.RelatedTypeName)) continue;
+            var chainedRelatedType = TypeUtilities.FindTypeByFullName(chainedJoin.RelatedTypeName);
+            if (chainedRelatedType == null) continue;
+
+            var deepChained = GetChainedOutputJoins(chainedAlias).ToArray();
+            string memberTypeName;
+            if (deepChained.Length > 0)
+            {
+                var deepSubName = EnsureSubType(chainedAlias, chainedRelatedType, deepChained, folderId);
+                memberTypeName = $"{GENERATED_TYPE_NAMESPACE}.{deepSubName}";
+            }
+            else
+            {
+                memberTypeName = chainedRelatedType.FullName!;
+            }
+
+            members.Add(new DefinedDataTypeDataMember
+            {
+                RelationshipName = chainedAlias,
+                IsList = true,
+                RelatedToDataType = memberTypeName
+            });
+        }
+
+        var def = new DefinedDataStructure
+        {
+            EntityFolderID = folderId,
+            EntityName = subTypeName,
+            DataTypeName = subTypeName,
+            DataTypeNameSpace = GENERATED_TYPE_NAMESPACE,
+            GenerateEntityServiceFor = false,
+            CanChangeServiceGeneration = false,
+            StorageOption = StorageOption.NotDatabaseStored,
+            IncludeDatabaseMarkups = false,
+            GenerateDataType = true
+        };
+        def.Children = members.ToArray();
+        DataStructureService.AddOrUpdateDataStructure(def);
+
+        return subTypeName;
+    }
+
     private ValidationIssue? ValidateOutputTypeShape(DefinedDataStructure existing, Type primaryType)
     {
         var mismatches = new List<string>();
 
-        var sourceChild = existing.Children?.FirstOrDefault(c => c.RelationshipName == "Source");
+        var sourceChild = existing.Children?.FirstOrDefault(c => c.RelationshipName == primaryType.Name);
         if (sourceChild == null)
-            mismatches.Add("missing 'Source' property");
+            mismatches.Add($"missing '{primaryType.Name}' property");
         else if (sourceChild.RelatedToDataType != primaryType.FullName)
-            mismatches.Add($"'Source' has type '{sourceChild.RelatedToDataType}', expected '{primaryType.FullName}'");
+            mismatches.Add($"'{primaryType.Name}' has wrong type");
 
         foreach (var join in JoinDefinitions ?? [])
         {
@@ -1486,13 +1660,30 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (child == null)
             {
                 mismatches.Add($"missing property '{memberName}'");
+                continue;
+            }
+            if (!child.IsList)
+            {
+                mismatches.Add($"'{memberName}' must be a list");
+                continue;
+            }
+
+            var chainedOutputJoins = GetChainedOutputJoins(memberName).ToArray();
+            if (chainedOutputJoins.Length > 0)
+            {
+                var relatedType = TypeUtilities.FindTypeByFullName(join.RelatedTypeName!);
+                if (relatedType != null)
+                {
+                    var expectedSubTypeName = SubTypeName(relatedType, chainedOutputJoins);
+                    var expectedFullName = $"{GENERATED_TYPE_NAMESPACE}.{expectedSubTypeName}";
+                    if (child.RelatedToDataType != expectedFullName)
+                        mismatches.Add($"'{memberName}' type mismatch (expected sub-type '{expectedSubTypeName}')");
+                }
             }
             else
             {
                 if (child.RelatedToDataType != join.RelatedTypeName)
                     mismatches.Add($"'{memberName}' type mismatch");
-                if (!child.IsList)
-                    mismatches.Add($"'{memberName}' must be a list");
             }
         }
 
@@ -1510,31 +1701,92 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         (joinDefinitions ?? []).Any(j => j.IncludeInOutput && !j.IsChainedJoin
             && !string.IsNullOrWhiteSpace(j.RelatedTypeName));
 
-    private string GenerateOutputTypeName()
+    private IEnumerable<JoinDefinition> GetChainedOutputJoins(string parentAlias) =>
+        (JoinDefinitions ?? []).Where(j =>
+            j.IncludeInOutput &&
+            string.Equals(j.SourceTable, parentAlias, StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(j.RelatedTypeName));
+
+    /// <summary>
+    /// Builds a type name from a readable prefix and a structural signature.
+    /// The prefix (capped at 60 chars) is for human readability; the 8-char MD5 hash of the
+    /// structural signature guarantees uniqueness — identical structures always produce the same
+    /// hash, so types are shared across steps; different structures produce different hashes.
+    /// </summary>
+    private static string BuildTypeName(string prefix, string structuralSig)
     {
-        var primaryName = GetPrimaryType()?.Name ?? "Unknown";
-        var joinNames = (joinDefinitions ?? [])
-            .Where(j => j.IncludeInOutput && !j.IsChainedJoin && !string.IsNullOrWhiteSpace(j.RelatedTypeName))
-            .Select(j =>
-            {
-                var tn = j.RelatedTypeName!;
-                int dot = tn.LastIndexOf('.');
-                return dot >= 0 ? tn[(dot + 1)..] : tn;
-            })
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var fullName = joinNames.Count == 0
-            ? primaryName
-            : string.Join("_", new[] { primaryName }.Concat(joinNames));
-
-        const int maxLength = 80;
-        if (fullName.Length <= maxLength) return fullName;
-
+        const int prefixMax = 60;
+        if (prefix.Length > prefixMax) prefix = prefix[..prefixMax];
         var hash = Convert.ToHexString(
             System.Security.Cryptography.MD5.HashData(
-                System.Text.Encoding.UTF8.GetBytes(fullName)))[..8];
-        return $"{fullName[..(maxLength - 9)]}_{hash}";
+                Encoding.UTF8.GetBytes(structuralSig)))[..8];
+        return $"{prefix}_{hash}";
+    }
+
+    /// <summary>
+    /// Computes the name for a sub-type DTO (a join that has chained output joins).
+    /// The structural signature encodes the joined entity's full type name and the full type names
+    /// of all chained joins recursively — so identical structures share a type across steps.
+    /// Parent alias is intentionally excluded so sub-types are reusable regardless of context.
+    /// </summary>
+    private string SubTypeName(Type joinedType, IEnumerable<JoinDefinition> chainedJoins)
+    {
+        var chainList = chainedJoins.Where(j => !string.IsNullOrWhiteSpace(j.RelatedTypeName)).ToArray();
+        var aliasParts = chainList
+            .Select(j => j.EffectiveName ?? "Unknown")
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase);
+        var prefix = string.Join("_", new[] { joinedType.Name }.Concat(aliasParts));
+        var sig    = BuildSubTypeSignature(joinedType.FullName!, chainList);
+        return BuildTypeName(prefix, sig);
+    }
+
+    /// <summary>
+    /// Recursively builds a structural signature for a sub-type.
+    /// Uses full .NET type names so aliases can be renamed without changing the signature.
+    /// </summary>
+    private string BuildSubTypeSignature(string rootFullName, JoinDefinition[] joins)
+    {
+        var sb = new StringBuilder(rootFullName);
+        foreach (var j in joins.OrderBy(j => j.EffectiveName, StringComparer.OrdinalIgnoreCase))
+        {
+            sb.Append('|').Append(j.EffectiveName).Append(':').Append(j.RelatedTypeName);
+            var deep = GetChainedOutputJoins(j.EffectiveName!).ToArray();
+            if (deep.Length > 0)
+            {
+                var deepType = TypeUtilities.FindTypeByFullName(j.RelatedTypeName!);
+                sb.Append('[')
+                  .Append(BuildSubTypeSignature(deepType?.FullName ?? j.RelatedTypeName!, deep))
+                  .Append(']');
+            }
+        }
+        return sb.ToString();
+    }
+
+    private string GenerateOutputTypeName()
+    {
+        var primaryType = GetPrimaryType();
+        if (primaryType == null) return "Unknown";
+
+        var allOutputJoins = (joinDefinitions ?? [])
+            .Where(j => j.IncludeInOutput && !string.IsNullOrWhiteSpace(j.RelatedTypeName))
+            .ToArray();
+
+        // Readable prefix: primary short name + direct join aliases only (sorted)
+        var directAliases = allOutputJoins
+            .Where(j => !j.IsChainedJoin)
+            .Select(j => j.EffectiveName ?? "Unknown")
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase);
+        var prefix = string.Join("_", new[] { primaryType.Name }.Concat(directAliases));
+
+        // Structural signature: primary full name + every output join with parent context + full type name.
+        // Including SourceTable in each entry means chained vs direct joins with the same aliases
+        // produce different signatures and therefore different type names.
+        var sigParts = allOutputJoins
+            .Select(j => $"{j.SourceTable ?? "main"}>{j.EffectiveName ?? ""}:{j.RelatedTypeName ?? ""}")
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+        var sig = $"{primaryType.FullName}|{string.Join("|", sigParts)}";
+
+        return BuildTypeName(prefix, sig);
     }
 
     // --- ORM field helpers ---------------------------------------------------

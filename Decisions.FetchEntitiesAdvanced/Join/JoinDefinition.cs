@@ -127,7 +127,6 @@ public class JoinDefinition : IValidationSource, INotifyPropertyChanged
     /// (Source is not the primary entity).
     /// </summary>
     [PropertyClassification(6, "Include In Output", new[] { "Join" })]
-    [BooleanPropertyHidden(nameof(IsChainedJoin), true)]
     public bool IncludeInOutput
     {
         get => includeInOutput;
