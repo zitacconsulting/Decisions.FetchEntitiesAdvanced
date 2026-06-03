@@ -470,15 +470,16 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         if (filterSql != null)
             statement.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(filterSql));
 
-        // 3. JoinDefinitions → EXISTS subqueries for filter-only joins
+        // 3. RequireMatch joins → SQL-level EXISTS subqueries (nested for chained joins).
+        //    Chained joins are skipped at the top level — they are embedded recursively as
+        //    nested EXISTS inside their parent's subquery by BuildExistsSql.
+        int existsAliasCounter = 0;
         foreach (var join in JoinDefinitions ?? [])
         {
-            bool filterOnly = !HasOutputJoins || !join.IncludeInOutput || join.IsChainedJoin;
-            if (!filterOnly) continue;
-            if (!join.RequireMatch) continue;
-            var joinExists = BuildExistsForJoin(join, data, primaryType, JoinDefinitions!);
-            if (joinExists != null)
-                statement.WhereConditions.WhereConditions.Add(joinExists);
+            if (!join.RequireMatch || join.IsChainedJoin) continue;
+            var existsSql = BuildExistsSql(join, MAIN_ALIAS, JoinDefinitions!, primaryType, data, ref existsAliasCounter);
+            if (existsSql != null)
+                statement.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(existsSql));
         }
 
         // 4. FolderId filter for folder-aware entity types
@@ -486,7 +487,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             && data.Data.TryGetValue("FolderId", out var folderIdObj)
             && folderIdObj is string folderId && !string.IsNullOrEmpty(folderId))
         {
-            ApplyFolderFilter(statement, primaryType, folderId);
+            ApplyFolderFilter(statement, primaryType, folderId, ReadUncommitted);
         }
 
         // 5. Sort
@@ -643,28 +644,20 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                     relatedStmt.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(rawCond));
             }
 
+            // Push RequireMatch chained joins (source = this join's alias) into the batch-load
+            // SQL as EXISTS subqueries so the database filters them rather than in-memory code.
+            int chainAliasCounter = 0;
+            foreach (var chainedJoin in JoinDefinitions!)
+            {
+                if (!chainedJoin.RequireMatch) continue;
+                if (!string.Equals(chainedJoin.SourceTable, joinEffectiveName, StringComparison.OrdinalIgnoreCase)) continue;
+                var chainedExistsSql = BuildExistsSql(chainedJoin, "main", JoinDefinitions!, primaryType, data, ref chainAliasCounter);
+                if (chainedExistsSql != null)
+                    relatedStmt.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(chainedExistsSql));
+            }
+
             var related = orm.Fetch(relatedType, relatedStmt, FetchDeletedEntities, !FastFetch) ?? [];
             tableResults[joinEffectiveName] = related;
-
-            if (join.RequireMatch)
-            {
-                primary = primary
-                    .Where(p => related.Any(r =>
-                        f2fMappings.All(m =>
-                        {
-                            var joinVal = GetOrmFieldValue(r, m.JoinFieldName!);
-                            var srcVal  = GetOrmFieldValue(p, m.SourceFieldName!);
-                            if (srcVal == null && sourceFKMap != null)
-                            {
-                                var pid = p.GetPrimaryKeyValue();
-                                if (pid != null) sourceFKMap.TryGetValue(pid, out srcVal);
-                            }
-                            return Equals(joinVal, srcVal);
-                        })))
-                    .ToArray();
-                tableResults[MAIN_ALIAS]       = primary;
-                tableResults[primaryType.Name] = primary;
-            }
         }
 
         if (primary.Length == 0)
@@ -1207,13 +1200,24 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return $"'{value.ToString()?.Replace("'", "''") ?? string.Empty}'";
     }
 
-    // --- EXISTS builder (filter-only joins) ----------------------------------
+    // --- EXISTS builder (RequireMatch joins, supports nested chains) ----------
 
-    private static ExistsSubqueryCondition? BuildExistsForJoin(
+    /// <summary>
+    /// Recursively builds a correlated EXISTS SQL fragment for <paramref name="join"/> and any
+    /// RequireMatch chained joins that source from it.  Each level gets a unique alias derived
+    /// from <paramref name="aliasCounter"/> so multiple siblings or deep chains never collide.
+    ///
+    /// Example for X→Y→Z (both RequireMatch):
+    /// <code>EXISTS (SELECT 1 FROM y_table chj0_ WHERE chj0_.x_id = main.id
+    ///   AND EXISTS (SELECT 1 FROM z_table chj1_ WHERE chj1_.y_id = chj0_.id))</code>
+    /// </summary>
+    private static string? BuildExistsSql(
         JoinDefinition join,
-        StepStartData data,
+        string parentAlias,
+        JoinDefinition[] allJoins,
         Type primaryType,
-        JoinDefinition[] allJoins)
+        StepStartData data,
+        ref int aliasCounter)
     {
         var mappings = join.FieldMappings;
         if (mappings == null || mappings.Length == 0) return null;
@@ -1228,27 +1232,37 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         var sourceType = ResolveSourceType(join.SourceTable, primaryType, allJoins);
         if (sourceType == null) return null;
 
-        string sourceAlias = string.IsNullOrEmpty(join.SourceTable)
-            || join.SourceTable == MAIN_ALIAS
-            || string.Equals(join.SourceTable, primaryType.Name, StringComparison.OrdinalIgnoreCase)
-            ? MAIN_ALIAS : join.SourceTable;
+        string myAlias = $"chj{aliasCounter++}_";
 
-        var conditions = BuildMappingConditions(mappings, relatedType, sourceType, "chj_", sourceAlias, data);
+        var conditions = BuildMappingConditions(mappings, relatedType, sourceType, myAlias, parentAlias, data);
         if (conditions.Count == 0) return null;
 
-        return new ExistsSubqueryCondition($"{relatedTable} chj_", conditions, negate: false);
+        // Recursively embed RequireMatch chained children as nested EXISTS.
+        var effectiveName = join.EffectiveName;
+        if (effectiveName != null)
+        {
+            foreach (var childJoin in allJoins)
+            {
+                if (!childJoin.RequireMatch) continue;
+                if (!string.Equals(childJoin.SourceTable, effectiveName, StringComparison.OrdinalIgnoreCase)) continue;
+                var childSql = BuildExistsSql(childJoin, myAlias, allJoins, primaryType, data, ref aliasCounter);
+                if (childSql != null) conditions.Add(childSql);
+            }
+        }
+
+        return $"EXISTS (SELECT 1 FROM {QT(relatedTable)} {myAlias} WHERE {string.Join(" AND ", conditions)})";
     }
 
     // --- Folder filter -------------------------------------------------------
 
-    private static void ApplyFolderFilter(CompositeSelectStatement stmt, Type entityType, string folderId)
+    private static void ApplyFolderFilter(CompositeSelectStatement stmt, Type entityType, string folderId, bool readUncommitted = false)
     {
         // Validate folderId is a real GUID before embedding in SQL — prevents injection
         // if a non-GUID value reaches this point via the FolderId step input.
         if (!Guid.TryParse(folderId, out var folderGuid)) return;
         string safeFolderId = folderGuid.ToString("D");
 
-        bool noLock = CompositeSelectStatement.NoLockReadDefault;
+        bool noLock = CompositeSelectStatement.NoLockReadDefault && readUncommitted;
         string noLockHint = noLock ? " (nolock) " : string.Empty;
 
         string fieldName = entityType == typeof(Folder) ? "folder_id" : "entity_folder_id";

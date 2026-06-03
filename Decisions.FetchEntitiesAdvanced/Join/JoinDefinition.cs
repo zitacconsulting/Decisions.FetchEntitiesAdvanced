@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.Serialization;
 using DecisionsFramework;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -20,8 +21,17 @@ namespace Decisions.FetchEntitiesAdvanced.Join;
 ///   the join is executed as a batch query and the results appear on the output DTO.
 /// </summary>
 [Writable]
-public class JoinDefinition : IValidationSource
+public class JoinDefinition : IValidationSource, INotifyPropertyChanged
 {
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void Notify(params string[] names)
+    {
+        if (PropertyChanged == null) return;
+        foreach (var n in names)
+            PropertyChanged.Invoke(this, new PropertyChangedEventArgs(n));
+    }
+
     // -----------------------------------------------------------------------
     // Backing fields
     // -----------------------------------------------------------------------
@@ -30,6 +40,7 @@ public class JoinDefinition : IValidationSource
     [WritableValue] private string? relatedTypeName;
     [WritableValue] private string? sourceTypeName;
     [WritableValue] private string? mainTypeName;
+    [WritableValue] private string? sourceTable;
     [WritableValue] private FieldMapping[]? fieldMappings;
     [WritableValue] private bool includeInOutput = true;
 
@@ -42,10 +53,17 @@ public class JoinDefinition : IValidationSource
     /// Dropdown shows the primary type's short name (e.g. "Account") plus output aliases
     /// of preceding joins for chained joins.
     /// </summary>
-    [WritableValue]
     [PropertyClassification(0, "Source", new[] { "Join" })]
     [SelectStringEditor("AvailableSources", SelectStringEditorType.DropdownList, true)]
-    public string? SourceTable { get; set; }
+    public string? SourceTable
+    {
+        get => sourceTable;
+        set
+        {
+            sourceTable = value;
+            Notify(nameof(SourceTable), nameof(IsChainedJoin), nameof(IncludeInOutput));
+        }
+    }
 
     /// <summary>
     /// Fully qualified name of the related ORM entity type to join.
