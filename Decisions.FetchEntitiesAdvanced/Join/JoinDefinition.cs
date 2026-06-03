@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Runtime.Serialization;
 using DecisionsFramework;
 using DecisionsFramework.Design.ConfigurationStorage.Attributes;
@@ -21,17 +20,8 @@ namespace Decisions.FetchEntitiesAdvanced.Join;
 ///   the join is executed as a batch query and the results appear on the output DTO.
 /// </summary>
 [Writable]
-public class JoinDefinition : IValidationSource, INotifyPropertyChanged
+public class JoinDefinition : IValidationSource
 {
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    private void Notify(params string[] names)
-    {
-        if (PropertyChanged == null) return;
-        foreach (var n in names)
-            PropertyChanged.Invoke(this, new PropertyChangedEventArgs(n));
-    }
-
     // -----------------------------------------------------------------------
     // Backing fields
     // -----------------------------------------------------------------------
@@ -58,11 +48,7 @@ public class JoinDefinition : IValidationSource, INotifyPropertyChanged
     public string? SourceTable
     {
         get => sourceTable;
-        set
-        {
-            sourceTable = value;
-            Notify(nameof(SourceTable), nameof(IsChainedJoin), nameof(IncludeInOutput));
-        }
+        set => sourceTable = value;
     }
 
     /// <summary>
