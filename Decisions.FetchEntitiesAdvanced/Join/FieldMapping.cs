@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
@@ -348,8 +349,13 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         {
             if (JoinIsUnary) return GetOrmFieldNamesForUnary(relatedTypeName, joinSideTypeValue);
             var filterType = GetTargetTypeFromSide(sourceSideTypeValue, sourceTypeName, sourceFieldName);
+            // Full scan for inverse FK columns in the related type's table (e.g. _SourceType FK
+            // written by ORMOneToManyRelationship<RelatedType> on another entity). Using the full
+            // scan rather than the partner-specific version so chained joins work correctly even
+            // when SourceTypeName hasn't been updated yet (it's only refreshed when the
+            // JoinDefinitions array is replaced, not when the user changes the Source dropdown).
             return GetOrmFieldNames(relatedTypeName, filterType, operatorValue)
-                .Concat(GetInverseFKFieldNames(relatedTypeName, sourceTypeName, filterType, operatorValue))
+                .Concat(GetAllInverseFKFieldNames(relatedTypeName, filterType, operatorValue))
                 .Distinct().OrderBy(n => n).ToArray();
         }
     }
@@ -711,6 +717,58 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
         if (t == null) return null;
         if (IsEntityRefType(t) || typeof(IORMRelationship).IsAssignableFrom(t)) return typeof(string);
         return t;
+    }
+
+    // Cache: entity type → FK column names written into its table by ORMOneToManyRelationship<T> on any other entity.
+    private static readonly ConcurrentDictionary<Type, string[]> AllInverseFKCache = new();
+
+    // Scans all loaded ORM entity types for ORMOneToManyRelationship<entityType> fields and returns
+    // the FK column names they write into entityType's table. Cached per entity type.
+    // Used for AvailableJoinFields so chained-join scenarios work even when SourceTypeName is stale.
+    private static string[] GetAllInverseFKFieldNames(string? fullTypeName, Type? filterType, string? filterOp)
+    {
+        if (string.IsNullOrWhiteSpace(fullTypeName)) return [];
+        var entityType = TypeUtilities.FindTypeByFullName(fullTypeName);
+        if (entityType == null) return [];
+
+        var fkNames = AllInverseFKCache.GetOrAdd(entityType, t =>
+        {
+            var found = new List<string>();
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch { continue; }
+                foreach (var ownerType in types)
+                {
+                    if (ORMEntityAttribute.Of(ownerType) == null) continue;
+                    foreach (var acc in DataUtilities.GetDataMemberAccessorsForClass(
+                        ownerType, cache: true, publicOnly: false))
+                    {
+                        if (!typeof(IORMOneToManyRelationship).IsAssignableFrom(acc.DataType)) continue;
+                        var args = acc.DataType.GetGenericArguments();
+                        if (args.Length == 0 || !args[0].IsAssignableFrom(t)) continue;
+                        try
+                        {
+                            if (ownerType.GetConstructor(Type.EmptyTypes) == null) continue;
+                            var owner = Activator.CreateInstance(ownerType);
+                            if (acc.GetValue(owner) is IORMOneToManyRelationship rel
+                                && !string.IsNullOrWhiteSpace(rel.FieldName))
+                                found.Add(rel.FieldName);
+                        }
+                        catch { /* skip inaccessible types */ }
+                    }
+                }
+            }
+            return found.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        });
+
+        // FK columns are always string-typed in the DB; apply the same type/operator filters used elsewhere.
+        if ((filterType != null && !IsTypeCompatible(typeof(string), filterType))
+            || !FieldPassesOperatorFilter(typeof(string), filterOp))
+            return [];
+
+        return fkNames;
     }
 
 }

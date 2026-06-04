@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Globalization;
 using System.Reflection;
@@ -566,6 +567,13 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 }
             }
 
+            // Inverse FK fields: FK columns in this table that are owned by an
+            // ORMOneToManyRelationship<T> on another entity type (e.g. _parent_id when
+            // ParentType declares ORMOneToManyRelationship<ThisType>).
+            // These have no C# property on this type but are valid string FK targets.
+            foreach (var fk in GetAllInverseFKFieldNames(type))
+                if (seen.Add(fk)) result.Add(fk);
+
             return result.OrderBy(n => n).ToArray();
         }
     }
@@ -1077,6 +1085,51 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 yield return path;
             }
         }
+    }
+
+    // Cache: entity type → FK column names defined on OTHER types via ORMOneToManyRelationship<T>.
+    private static readonly ConcurrentDictionary<Type, string[]> InverseFKFieldCache = new();
+
+    /// <summary>
+    /// Scans all loaded assemblies for ORM entity types that declare an
+    /// <c>ORMOneToManyRelationship&lt;entityType&gt;</c> and returns the FK column
+    /// names those relationships write into <paramref name="entityType"/>'s table.
+    /// Results are cached per entity type.
+    /// </summary>
+    private static string[] GetAllInverseFKFieldNames(Type entityType)
+    {
+        return InverseFKFieldCache.GetOrAdd(entityType, t =>
+        {
+            var result = new List<string>();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = assembly.GetTypes(); }
+                catch { continue; }
+
+                foreach (var ownerType in types)
+                {
+                    if (ORMEntityAttribute.Of(ownerType) == null) continue;
+                    foreach (var acc in DataUtilities.GetDataMemberAccessorsForClass(
+                        ownerType, cache: true, publicOnly: false))
+                    {
+                        if (!typeof(IORMOneToManyRelationship).IsAssignableFrom(acc.DataType)) continue;
+                        var args = acc.DataType.GetGenericArguments();
+                        if (args.Length == 0 || !args[0].IsAssignableFrom(t)) continue;
+                        try
+                        {
+                            if (ownerType.GetConstructor(Type.EmptyTypes) == null) continue;
+                            var owner = Activator.CreateInstance(ownerType);
+                            if (acc.GetValue(owner) is IORMOneToManyRelationship rel
+                                && !string.IsNullOrWhiteSpace(rel.FieldName))
+                                result.Add(rel.FieldName);
+                        }
+                        catch { /* skip inaccessible types */ }
+                    }
+                }
+            }
+            return result.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        });
     }
 
 }
