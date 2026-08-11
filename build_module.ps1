@@ -17,4 +17,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Module built successfully!" -ForegroundColor Green
-Write-Host "Output: Decisions.FetchEntitiesAdvanced.zip" -ForegroundColor Cyan
+Write-Host "Output: Zitac.FetchEntitiesAdvanced.zip" -ForegroundColor Cyan

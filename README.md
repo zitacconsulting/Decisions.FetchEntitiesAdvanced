@@ -159,7 +159,7 @@ dotnet msbuild build.proj -t:build_module
 
 ### Build Output
 
-The build creates `Decisions.FetchEntitiesAdvanced.zip` in the root directory. Upload it to Decisions via **System > Administration > Features**.
+The build creates `Zitac.FetchEntitiesAdvanced.zip` in the root directory. Upload it to Decisions via **System > Administration > Features**.
 
 ## Project Structure
 

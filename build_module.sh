@@ -26,4 +26,4 @@ if [ $? -ne 0 ]; then
 fi
 
 echo -e "${GREEN}Module built successfully!${NC}"
-echo -e "${CYAN}Output: Decisions.FetchEntitiesAdvanced.zip${NC}"
+echo -e "${CYAN}Output: Zitac.FetchEntitiesAdvanced.zip${NC}"
