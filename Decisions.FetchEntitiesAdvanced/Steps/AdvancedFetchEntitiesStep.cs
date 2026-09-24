@@ -19,6 +19,7 @@ using DecisionsFramework.Design.Properties;
 using DecisionsFramework.Design.Properties.Attributes;
 using DecisionsFramework.ServiceLayer;
 using DecisionsFramework.ServiceLayer.Services.Folder;
+using DecisionsFramework.ServiceLayer.Services.Projects;
 using DecisionsFramework.ServiceLayer.Utilities;
 using DecisionsFramework.Utilities;
 using DecisionsFramework.Utilities.Data;
@@ -43,7 +44,8 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     // Constants
     // -------------------------------------------------------------------------
 
-    private const string GENERATED_TYPE_NAMESPACE = "Zitac.FetchAdvanced.Generated";
+    // Shared namespace used by steps created before per-project namespaces, and by flows outside a project.
+    private const string LEGACY_GENERATED_TYPE_NAMESPACE = "Zitac.FetchAdvanced.Generated";
     private const string MAIN_ALIAS = "main";
 
     // -------------------------------------------------------------------------
@@ -54,6 +56,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     [WritableValue] private FilterNode[]? filterNodes;
     [WritableValue] private JoinDefinition[]? joinDefinitions;
     [WritableValue] private string? lastGeneratedTypeName;
+    [WritableValue] private string? generatedTypeNamespace;   // namespace the output type was generated in; null = see GeneratedNamespace
     [WritableValue] private string? sortField;
     [WritableValue] private ORMResultOrder sortOrder = ORMResultOrder.Ascending;
     [WritableValue] private int? limitResults;
@@ -357,7 +360,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
             if (HasOutputJoins)
             {
-                var generatedType = TypeUtilities.FindTypeByFullName(GENERATED_TYPE_NAMESPACE + "." + GenerateOutputTypeName());
+                var generatedType = TypeUtilities.FindTypeByFullName(GeneratedNamespace + "." + GenerateOutputTypeName());
                 if (generatedType != null)
                     resultDesc = new DataDescription(new DecisionsNativeType(generatedType), "EntityResults", true, false, false);
             }
@@ -449,7 +452,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         // Auto-generate output type when there are output joins and no other errors
         if (HasOutputJoins && issues.Count == 0)
         {
-            var typeIssue = EnsureOutputType();
+            var typeIssue = EnsureOutputType() ?? CheckOutputTypeProject();
             if (typeIssue != null)
                 issues.Add(typeIssue);
         }
@@ -725,10 +728,10 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         // 11. Instantiate generated DTO array
         var generatedTypeName = GenerateOutputTypeName();
-        var dtoType = TypeUtilities.FindTypeByFullName(GENERATED_TYPE_NAMESPACE + "." + generatedTypeName);
+        var dtoType = TypeUtilities.FindTypeByFullName(GeneratedNamespace + "." + generatedTypeName);
         if (dtoType == null)
             throw new InvalidOperationException(
-                $"Generated output type '{GENERATED_TYPE_NAMESPACE}.{generatedTypeName}' could not be found. " +
+                $"Generated output type '{GeneratedNamespace}.{generatedTypeName}' could not be found. " +
                 "Save the step to trigger type generation, then reload the flow.");
 
         var dtoArray = BuildDtoArray(dtoType, primary, tableResults, inverseFKLookup);
@@ -1492,7 +1495,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 if (chainedOutputJoins.Length > 0)
                 {
                     var subTypeName = SubTypeName(relatedType, chainedOutputJoins);
-                    var subDtoType  = TypeUtilities.FindTypeByFullName($"{GENERATED_TYPE_NAMESPACE}.{subTypeName}");
+                    var subDtoType  = TypeUtilities.FindTypeByFullName($"{GeneratedNamespace}.{subTypeName}");
                     if (subDtoType != null)
                     {
                         prop!.SetValue(dto, BuildJoinDtoArray(join, subDtoType, matched, tableResults, inverseFKLookup));
@@ -1554,7 +1557,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 if (deepChained.Length > 0)
                 {
                     var deepSubTypeName = SubTypeName(chainedRelatedType, deepChained);
-                    var deepDtoType     = TypeUtilities.FindTypeByFullName($"{GENERATED_TYPE_NAMESPACE}.{deepSubTypeName}");
+                    var deepDtoType     = TypeUtilities.FindTypeByFullName($"{GeneratedNamespace}.{deepSubTypeName}");
                     if (deepDtoType != null)
                     {
                         prop!.SetValue(dto, BuildJoinDtoArray(chainedJoin, deepDtoType, matched, tableResults, inverseFKLookup));
@@ -1640,6 +1643,86 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
     // --- Output type generation ----------------------------------------------
 
+    /// <summary>
+    /// Namespace the output type lives in. Stored once generated. Before that, an existing step (one that
+    /// generated a type before per-project namespaces existed) uses the legacy shared namespace, and a new
+    /// step uses its project's namespace.
+    /// </summary>
+    private string GeneratedNamespace =>
+        generatedTypeNamespace
+        ?? (!string.IsNullOrWhiteSpace(lastGeneratedTypeName) ? LEGACY_GENERATED_TYPE_NAMESPACE : ProjectNamespace());
+
+    /// <summary>
+    /// Per-project namespace <c>Zitac.FetchAdvanced.Generated.P_&lt;hash of project id&gt;</c>: unique across servers
+    /// and stable across export/import and project renames. Flows outside a project use the legacy shared namespace.
+    /// </summary>
+    private string ProjectNamespace()
+    {
+        var projectId = FlowProjectId();
+        if (string.IsNullOrWhiteSpace(projectId)) return LEGACY_GENERATED_TYPE_NAMESPACE;
+
+        // Hashed: project ids aren't guaranteed to be valid identifier characters
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.MD5.HashData(Encoding.UTF8.GetBytes(projectId)))[..12];
+        return $"{LEGACY_GENERATED_TYPE_NAMESPACE}.P_{hash}";
+    }
+
+    /// <summary>
+    /// Warns when the output type lives in another project that this flow's project doesn't depend on
+    /// (directly or transitively) — exporting this project would then not include the type.
+    /// </summary>
+    private ValidationIssue? CheckOutputTypeProject()
+    {
+        if (Flow == null) return null;
+        if (DataStructureService.GetDataStructureByName($"{GeneratedNamespace}.{GenerateOutputTypeName()}")
+            is not DefinedDataStructure def) return null;
+
+        // Only flows inside a project are exported per project; outside one there's nothing to warn about
+        var flowProjectId = FlowProjectId();
+        if (string.IsNullOrWhiteSpace(flowProjectId)) return null;
+
+        var typeProjectId = ProjectUtility.GetEntityProjectId(def);
+        if (string.Equals(flowProjectId, typeProjectId, StringComparison.OrdinalIgnoreCase)) return null;
+
+        const string remedy =
+            "so it won't be included when this project is exported. Change the joins so the type is regenerated " +
+            "in this project (downstream mappings must then be redone)";
+        if (string.IsNullOrWhiteSpace(typeProjectId))
+            return new ValidationIssue(this,
+                $"Output type '{def.DataTypeFullName}' is stored outside any project, {remedy}.",
+                null, BreakLevel.Warning);
+
+        if (ProjectDependsOn(flowProjectId, typeProjectId)) return null;
+
+        var typeProjectName = ProjectUtility.GetProjectById(typeProjectId, throwIfError: false)?.EntityName ?? typeProjectId;
+        return new ValidationIssue(this,
+            $"Output type '{def.DataTypeFullName}' belongs to project '{typeProjectName}', which this project " +
+            $"doesn't depend on, {remedy}, or add a dependency on that project.",
+            null, BreakLevel.Warning);
+    }
+
+    // Project of the flow's folder (same lookup ProjectUtility does for folder entities); null outside a project.
+    private string? FlowProjectId() =>
+        string.IsNullOrWhiteSpace(Flow?.EntityFolderID)
+            ? null
+            : ProjectUtility.GetEntityProjectId(Flow.EntityFolderID, includeDeleted: true, throwIfError: false);
+
+    private static bool ProjectDependsOn(string fromProjectId, string toProjectId)
+    {
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { fromProjectId };
+        var queue   = new Queue<string>([fromProjectId]);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            foreach (var dep in ProjectViewService.Instance.GetDependentProjects(new SystemUserContext(), current) ?? [])
+            {
+                if (string.Equals(dep.Id, toProjectId, StringComparison.OrdinalIgnoreCase)) return true;
+                if (dep.Id != null && visited.Add(dep.Id)) queue.Enqueue(dep.Id);
+            }
+        }
+        return false;
+    }
+
     private ValidationIssue? EnsureOutputType()
     {
         var primaryType = GetPrimaryType();
@@ -1647,10 +1730,26 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         var typeName = GenerateOutputTypeName();
 
-        if (!string.IsNullOrWhiteSpace(lastGeneratedTypeName) && lastGeneratedTypeName != typeName)
-            TryDeleteOrphanedType(lastGeneratedTypeName);
+        // A new step, or one whose structure changed (it needs a new type anyway), generates in its project's
+        // namespace. An unchanged existing step keeps the namespace its type already lives in, so existing
+        // flows are never retyped.
+        if (typeName != lastGeneratedTypeName)
+        {
+            var projectNamespace = ProjectNamespace();
+            if (generatedTypeNamespace != projectNamespace)
+            {
+                generatedTypeNamespace = projectNamespace;
+                ClearFlowStepCache();
+                OnPropertyChanged(nameof(OutcomeScenarios));
+            }
+        }
 
-        string fullName = $"{GENERATED_TYPE_NAMESPACE}.{typeName}";
+        // The previous type is deliberately NOT deleted when the structure changes: generated types are
+        // shared by every step with the same structure (across flows and projects). The platform does
+        // record the flows' dependency on the type, but its pre-delete check (CheckIfTypeCanBeDeleted)
+        // looks it up under a different type key, so the delete isn't blocked — it only shows a
+        // "used by N entities, click to undelete" warning afterwards, and the other flows break at runtime.
+        string fullName = $"{GeneratedNamespace}.{typeName}";
         var existing = DataStructureService.GetDataStructureByName(fullName) as DefinedDataStructure;
 
         if (existing == null)
@@ -1669,14 +1768,6 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return shapeIssue;
     }
 
-    private static void TryDeleteOrphanedType(string typeName)
-    {
-        var existing = DataStructureService.GetDataStructureByName($"{GENERATED_TYPE_NAMESPACE}.{typeName}");
-        if (existing == null) return;
-        try { new DynamicORM().Delete(existing); }
-        catch { /* Still referenced — leave it */ }
-    }
-
     private void CreateOutputType(Type primaryType)
     {
         string folderId = Flow?.EntityFolderID ?? string.Empty;
@@ -1687,7 +1778,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             EntityFolderID = folderId,
             EntityName = typeName,
             DataTypeName = typeName,
-            DataTypeNameSpace = GENERATED_TYPE_NAMESPACE,
+            DataTypeNameSpace = GeneratedNamespace,
             GenerateEntityServiceFor = false,
             CanChangeServiceGeneration = false,
             StorageOption = StorageOption.NotDatabaseStored,
@@ -1718,7 +1809,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (chainedOutputJoins.Length > 0)
             {
                 var subTypeName = EnsureSubType(memberName, relatedType, chainedOutputJoins, folderId);
-                memberTypeName = $"{GENERATED_TYPE_NAMESPACE}.{subTypeName}";
+                memberTypeName = $"{GeneratedNamespace}.{subTypeName}";
             }
             else
             {
@@ -1747,6 +1838,12 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     {
         var subTypeName = SubTypeName(joinedType, chainedJoins);
 
+        // Sub-type names are structural hashes, so an existing one already has this exact shape. Leave it
+        // alone: it may belong to another flow/project, and AddOrUpdate would re-save it into this flow's
+        // folder (moving it) and trigger a recompile.
+        if (DataStructureService.GetDataStructureByName($"{GeneratedNamespace}.{subTypeName}") != null)
+            return subTypeName;
+
         var members = new List<DefinedDataTypeDataMember>
         {
             new DefinedDataTypeDataMember
@@ -1769,7 +1866,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             if (deepChained.Length > 0)
             {
                 var deepSubName = EnsureSubType(chainedAlias, chainedRelatedType, deepChained, folderId);
-                memberTypeName = $"{GENERATED_TYPE_NAMESPACE}.{deepSubName}";
+                memberTypeName = $"{GeneratedNamespace}.{deepSubName}";
             }
             else
             {
@@ -1789,7 +1886,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             EntityFolderID = folderId,
             EntityName = subTypeName,
             DataTypeName = subTypeName,
-            DataTypeNameSpace = GENERATED_TYPE_NAMESPACE,
+            DataTypeNameSpace = GeneratedNamespace,
             GenerateEntityServiceFor = false,
             CanChangeServiceGeneration = false,
             StorageOption = StorageOption.NotDatabaseStored,
@@ -1836,7 +1933,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 if (relatedType != null)
                 {
                     var expectedSubTypeName = SubTypeName(relatedType, chainedOutputJoins);
-                    var expectedFullName = $"{GENERATED_TYPE_NAMESPACE}.{expectedSubTypeName}";
+                    var expectedFullName = $"{GeneratedNamespace}.{expectedSubTypeName}";
                     if (child.RelatedToDataType != expectedFullName)
                         mismatches.Add($"'{memberName}' type mismatch (expected sub-type '{expectedSubTypeName}')");
                 }
