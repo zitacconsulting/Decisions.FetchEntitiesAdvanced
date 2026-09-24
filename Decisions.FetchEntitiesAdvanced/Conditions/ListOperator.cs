@@ -20,4 +20,8 @@ public static class ListOperator
     public const string AvgOf = "Average Of";
     public const string MinOf = "Min Of";
     public const string MaxOf = "Max Of";
+
+    // Value-list comparisons — field (or collection sub-field) value vs. a string[] of values
+    public const string InList    = "In List";
+    public const string NotInList = "Not In List";
 }

@@ -295,20 +295,22 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             {
                 if (seen.Add(node.InputName!))
                 {
-                    // Determine input type: collection → sub-field type; entity ref → sub-field type or string FK;
-                    // primitive → field type
-                    Type? ft;
-                    if (node.IsCollectionField)
-                        ft = FilterNode.CountOperators.Contains(node.Operator ?? string.Empty)
+                    // Determine input type: value list → string[] (converted to the field type at runtime);
+                    // collection → sub-field type; entity ref → sub-field type or string FK; primitive → field type
+                    Type inputType;
+                    if (node.UsesValueList)
+                        inputType = typeof(string);
+                    else if (node.IsCollectionField)
+                        inputType = FilterNode.CountOperators.Contains(node.Operator ?? string.Empty)
                             ? typeof(double)  // COUNT(*) is always numeric
-                            : OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
+                            : FilterInputType(OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField));
                     else if (node.IsEntityRefField && node.FieldName?.Contains('.') == true)
-                        ft = GetEntityRefSubFieldType(node);
+                        inputType = FilterInputType(GetEntityRefSubFieldType(node));
                     else
-                        ft = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
+                        inputType = FilterInputType(OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName));
                     inputs.Add(new DataDescription(
-                        new DecisionsNativeType(FilterInputType(ft)),
-                        node.InputName!, false, false, false));
+                        new DecisionsNativeType(inputType),
+                        node.InputName!, node.UsesValueList, false, false));
                 }
             }
             CollectFilterNodeInputs(node.Children, inputs, seen);
@@ -937,17 +939,35 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             return $"(SELECT COUNT(*) FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk}) {cmpOp} {countVal}";
         }
 
+        // Aggregate / Contains / DoesNotContain / FirstInList / LastInList — need SubField + SubFieldOperator
+        if (string.IsNullOrWhiteSpace(node.SubField) || string.IsNullOrWhiteSpace(node.SubFieldOperator))
+            return null;
+
+        var    rawSubCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
+        string qSubCol   = Q(rawSubCol!);
+        var    subFt     = OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
+        // SUM/AVG results are always numeric regardless of the sub-field type
+        var    valueFt   = op is ListOperator.SumOf or ListOperator.AvgOf ? typeof(double) : subFt;
+
+        // Sub-field comparison: In List / Not In List against a string[], otherwise a single value
+        string subOp = node.SubFieldOperator!;
+        Func<string, string> compare;
+        if (FilterNode.IsValueListOperator(subOp))
+        {
+            var literals = ResolveValueListLiterals(node, data, valueFt);
+            if (literals == null) return null;
+            compare = expr => BuildValueListSql(expr, subOp, literals);
+        }
+        else
+        {
+            string? valueExpr = BuildCollectionValueExpr(node, data, valueFt);
+            if (valueExpr == null) return null;
+            compare = expr => ApplyOperator(expr, subOp, valueExpr);
+        }
+
         // Aggregate operators — SUM/AVG/MIN/MAX of a sub-field compared to a threshold
         if (op is ListOperator.SumOf or ListOperator.AvgOf or ListOperator.MinOf or ListOperator.MaxOf)
         {
-            if (string.IsNullOrWhiteSpace(node.SubField) || string.IsNullOrWhiteSpace(node.SubFieldOperator))
-                return null;
-            var    rawAggCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
-            string qAggCol   = Q(rawAggCol!);
-            var    aggFt     = OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
-            string? aggVal   = BuildCollectionValueExpr(node, data,
-                op is ListOperator.SumOf or ListOperator.AvgOf ? typeof(double) : aggFt);
-            if (aggVal == null) return null;
             string aggFunc = op switch
             {
                 ListOperator.SumOf => "SUM",
@@ -956,22 +976,10 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 ListOperator.MaxOf => "MAX",
                 _                  => "SUM"
             };
-            string aggOp = OperatorToSql(node.SubFieldOperator!);
-            return $"(SELECT {aggFunc}(c__.{qAggCol}) FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk}) {aggOp} {aggVal}";
+            return compare($"(SELECT {aggFunc}(c__.{qSubCol}) FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk})");
         }
 
-        // Contains / DoesNotContain / FirstInList / LastInList — need SubField + SubFieldOperator
-        if (string.IsNullOrWhiteSpace(node.SubField) || string.IsNullOrWhiteSpace(node.SubFieldOperator))
-            return null;
-
-        var    rawSubCol = GetOrmColumnName(elementType, node.SubField!) ?? node.SubField;
-        string qSubCol   = Q(rawSubCol!);
-        var    subFt     = OrmFieldHelper.GetFieldNetType(node.ElementTypeName, node.SubField);
-
-        string? valueExpr = BuildCollectionValueExpr(node, data, subFt);
-        if (valueExpr == null) return null;
-
-        string subCond   = ApplyOperator($"c__.{qSubCol}", node.SubFieldOperator!, valueExpr);
+        string subCond   = compare($"c__.{qSubCol}");
         string baseWhere = $"c__.{qfk} = {parentAlias}.{qpk}";
 
         if (op == ListOperator.Contains)
@@ -982,12 +990,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         // FirstInList / LastInList — scalar subquery ordered by child PK
         string qChildPK = Q(childAttr.GetKeyName(elementType));
         string sortDir  = op == ListOperator.FirstInList ? "ASC" : "DESC";
-        string scalarOp = OperatorToSql(node.SubFieldOperator!);
         // SQL Server uses TOP 1 in the SELECT clause; PostgreSQL uses LIMIT 1 at the end.
         bool   isMsSql     = DynamicORM.DatabaseDriver.DatabaseType == DataBaseTypeEnum.MSSQL;
         string topClause   = isMsSql ? "TOP 1 " : "";
         string limitClause = isMsSql ? "" : " LIMIT 1";
-        return $"(SELECT {topClause}c__.{qSubCol} FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk} ORDER BY c__.{qChildPK} {sortDir}{limitClause}) {scalarOp} {valueExpr}";
+        return compare($"(SELECT {topClause}c__.{qSubCol} FROM {qt} c__ WHERE c__.{qfk} = {parentAlias}.{qpk} ORDER BY c__.{qChildPK} {sortDir}{limitClause})");
     }
 
     /// <summary>Bare entity ref field (no dot): only IS NULL / IS NOT NULL on the FK column.</summary>
@@ -1080,6 +1087,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 };
 
             var terminalFt    = OrmFieldHelper.GetFieldNetType(currentType.FullName, dotPath);
+            if (FilterNode.IsValueListOperator(terminalOperator))
+            {
+                var literals = ResolveValueListLiterals(node, data, terminalFt);
+                return literals == null ? null : BuildValueListSql(expr, terminalOperator, literals);
+            }
             string? valueExpr = BuildEntityRefSubValueExpr(node, data, terminalFt);
             if (valueExpr == null) return null;
             return ApplyOperator(expr, terminalOperator, valueExpr);
@@ -1136,6 +1148,54 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     private static string ApplyOperator(string fieldExpr, string op, string valueExpr) =>
         $"{fieldExpr} {OperatorToSql(op)} {valueExpr}";
 
+    /// <summary>
+    /// Resolves an In List / Not In List value (string[] step input or hard-coded String List Value) to
+    /// distinct SQL literals of <paramref name="fieldType"/>. Null and unparsable entries are dropped.
+    /// Returns null when the step input itself is null — callers treat that as "skip this filter".
+    /// </summary>
+    private static List<string>? ResolveValueListLiterals(FilterNode node, StepStartData data, Type? fieldType)
+    {
+        IEnumerable<string?> entries;
+        if (node.ValueType == FilterValueType.StepInput)
+        {
+            if (string.IsNullOrWhiteSpace(node.InputName)) return null;
+            data.Data.TryGetValue(node.InputName!, out var raw);
+            if (raw == null) return null;
+            entries = raw switch
+            {
+                string s                         => new string?[] { s },
+                System.Collections.IEnumerable e => e.Cast<object?>().Select(o => o?.ToString()),
+                _                                => new string?[] { raw.ToString() }
+            };
+        }
+        else if (node.ValueType == FilterValueType.StringListValue)
+            entries = node.StringListValue ?? [];
+        else
+            return null;
+
+        // Distinct on the formatted literal, so e.g. "1" and "1.0" collapse for numeric fields
+        return entries
+            .Select(e => OrmFieldHelper.TryConvertListEntry(e, fieldType, out var v) ? FormatFilterValue(v, fieldType) : null)
+            .Where(l => l != null)
+            .Select(l => l!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// In List → <c>expr IN (...)</c>; Not In List → <c>(expr IS NULL OR expr NOT IN (...))</c>, since a null value
+    /// is not in the list. Empty list: In List matches nothing, Not In List matches everything.
+    /// </summary>
+    private static string BuildValueListSql(string fieldExpr, string op, List<string> literals)
+    {
+        bool negate = op == ListOperator.NotInList;
+        if (literals.Count == 0) return negate ? "1=1" : "1=0";
+        string list = string.Join(", ", literals);
+        return negate
+            ? $"({fieldExpr} IS NULL OR {fieldExpr} NOT IN ({list}))"
+            : $"{fieldExpr} IN ({list})";
+    }
+
     private static string OperatorToSql(string op) => op switch
     {
         JoinOperator.Equal          => "=",
@@ -1187,6 +1247,13 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 FilterValueType.IsNotNullOrEmpty => $"({fieldExpr} IS NOT NULL AND {fieldExpr} <> '')",
                 _ => null
             };
+
+        if (FilterNode.IsValueListOperator(node.Operator))
+        {
+            var listFt   = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
+            var literals = ResolveValueListLiterals(node, data, listFt);
+            return literals == null ? null : BuildValueListSql(fieldExpr, node.Operator!, literals);
+        }
 
         string? valueExpr;
         if (node.ValueType == FilterValueType.StepInput)

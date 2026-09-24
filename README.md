@@ -7,7 +7,7 @@ A flow step module for the [Decisions](https://decisions.com) platform that repl
 ## Features
 
 - **Recursive AND/OR filter tree** — nest filter groups to any depth with AND or OR logic.
-- **Rich filter operators** — `=`, `≠`, `>`, `≥`, `<`, `≤`, `LIKE` (with `%` wildcards), plus unary checks: IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY, IS NULL OR EMPTY, IS NOT NULL OR EMPTY.
+- **Rich filter operators** — `=`, `≠`, `>`, `≥`, `<`, `≤`, `LIKE` (with `%` wildcards), In List / Not In List (against a `string[]`), plus unary checks: IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY, IS NULL OR EMPTY, IS NOT NULL OR EMPTY.
 - **Step-input values** — any filter condition can be wired to a flow input instead of a static value.
 - **Collection field filtering** — filter on `ORMOneToManyRelationship` child lists: Contains, Does Not Contain, First/Last In List, Count comparisons (`=`, `≠`, `>`, `≥`, `<`, `≤`), and aggregate comparisons (Sum, Average, Min, Max of a sub-field).
 - **Entity-reference field filtering** — traverse dot-path chains through entity-reference navigation properties (e.g. `SubtypeData.NestedRef.SomeField`).
@@ -58,6 +58,15 @@ Use `%` as a wildcard character in string values:
 - `%foo%` — contains "foo"
 
 Matching is **case-insensitive** on both PostgreSQL (`ILIKE`) and SQL Server (collation-dependent, case-insensitive by default).
+
+### In List / Not In List
+
+Compare a field (or a collection sub-field) against a list of values. The value is always a `string[]` — either a step input or a hard-coded **String List Value** — and each entry is converted to the field's type (number, date, Guid, or string). Not available for bool fields.
+
+- Entries are de-duplicated before the SQL is generated. Null entries, and step-input entries that can't be converted to the field's type, are ignored (hard-coded entries that can't be converted are a validation error).
+- **Empty list:** In List matches nothing, Not In List matches everything. Inside an OR group the other conditions still apply.
+- **Null step input:** the filter is skipped, like other step-input filters.
+- **Not In List** includes rows where the field is null, since null is not in the list. To exclude them, combine it with an *Is Not Null* condition on the same field in an AND group. Likewise, to also match nulls with **In List**, combine it with *Is Null* in an OR group.
 
 ### Collection field filtering
 

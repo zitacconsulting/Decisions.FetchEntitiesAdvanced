@@ -94,6 +94,15 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         ListOperator.CountLt, ListOperator.CountLte
     };
 
+    // Value-list operators compare against a string[] (step input or hard-coded), never a single value
+    private static readonly string[] ValueListOperators = [ListOperator.InList, ListOperator.NotInList];
+
+    private static readonly string[] ValueListValueTypes =
+        [FilterValueType.StepInput, FilterValueType.StringListValue];
+
+    internal static bool IsValueListOperator(string? op) =>
+        op == ListOperator.InList || op == ListOperator.NotInList;
+
     // -----------------------------------------------------------------------
     // Backing fields
     // -----------------------------------------------------------------------
@@ -111,6 +120,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     [WritableValue] private string?   valueType;
     [WritableValue] private string?   inputName;
     [WritableValue] private string?   stringValue;
+    [WritableValue] private string[]? stringListValue;
     [WritableValue] private double?   numberValue;
     [WritableValue] private bool      boolValue;
     [WritableValue] private DateTime? dateTimeValue;
@@ -141,7 +151,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(ShowOperator),    nameof(ShowSubField),   nameof(ShowSubFieldOperator),
                 nameof(ShowValueType),   nameof(ShowStepInput),
                 nameof(ShowStringValue), nameof(ShowNumberValue),
-                nameof(ShowBoolValue),   nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+                nameof(ShowBoolValue),   nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -174,7 +184,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(ShowOperator),        nameof(ShowSubField),    nameof(ShowSubFieldOperator),
                 nameof(ShowValueType),       nameof(ShowStepInput),
                 nameof(ShowStringValue),     nameof(ShowNumberValue),
-                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -236,6 +246,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 operatorValue = nowCollection  ? ListOperator.Contains
                               : (newEntityRef && !nowDotPath) ? FilterValueType.IsNull  // bare entity ref → IS NULL
                               :                                  JoinOperator.Equal;     // primitive or dot-path
+            CoerceValueTypeForOperator();
 
             Notify(
                 nameof(FieldName),           nameof(SubField),            nameof(SubFieldOperator),
@@ -247,7 +258,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(ShowOperator),        nameof(ShowSubField),    nameof(ShowSubFieldOperator),
                 nameof(ShowValueType),       nameof(ShowStepInput),
                 nameof(ShowStringValue),     nameof(ShowNumberValue),
-                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -273,6 +284,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             operatorValue    = value;
             subField         = null;
             subFieldOperator = null;
+            CoerceValueTypeForOperator();
             Notify(
                 nameof(SubField),            nameof(SubFieldOperator),
                 nameof(AvailableFields),     nameof(FieldName),
@@ -282,7 +294,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(ShowSubField),        nameof(ShowSubFieldOperator),
                 nameof(ShowValueType),       nameof(ShowStepInput),
                 nameof(ShowStringValue),     nameof(ShowNumberValue),
-                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -314,7 +326,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(AvailableValueTypes), nameof(ValueType),
                 nameof(ShowValueType),       nameof(ShowStepInput),
                 nameof(ShowStringValue),     nameof(ShowNumberValue),
-                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -327,10 +339,13 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set
         {
             subFieldOperator = value;
+            CoerceValueTypeForOperator();
             Notify(
                 nameof(SubFieldOperator),
                 nameof(AvailableValueTypes), nameof(ValueType),
-                nameof(ShowValueType));
+                nameof(ShowValueType),       nameof(ShowStepInput),
+                nameof(ShowStringValue),     nameof(ShowNumberValue),
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         }
     }
 
@@ -348,7 +363,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 nameof(ShowOperator),
                 nameof(ShowStepInput),
                 nameof(ShowStringValue),     nameof(ShowNumberValue),
-                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue),
+                nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue),
                 nameof(AvailableFields),     nameof(FieldName),
                 nameof(AvailableOperators),  nameof(Operator));
         }
@@ -370,7 +385,15 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { stringValue = value; Notify(nameof(StringValue)); }
     }
 
-    [PropertyClassification(11, "Number Value", new[] { "Details" })]
+    [PropertyClassification(11, "String List Value", new[] { "Details" })]
+    [BooleanPropertyHidden(nameof(ShowStringListValue), false)]
+    public string[]? StringListValue
+    {
+        get => stringListValue;
+        set { stringListValue = value; Notify(nameof(StringListValue)); }
+    }
+
+    [PropertyClassification(12, "Number Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowNumberValue), false)]
     public double? NumberValue
     {
@@ -378,7 +401,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { numberValue = value; Notify(nameof(NumberValue)); }
     }
 
-    [PropertyClassification(12, "Bool Value", new[] { "Details" })]
+    [PropertyClassification(13, "Bool Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowBoolValue), false)]
     public bool BoolValue
     {
@@ -386,7 +409,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { boolValue = value; Notify(nameof(BoolValue)); }
     }
 
-    [PropertyClassification(13, "Date/Time Value", new[] { "Details" })]
+    [PropertyClassification(14, "Date/Time Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowDateTimeValue), false)]
     public DateTime? DateTimeValue
     {
@@ -394,7 +417,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         set { dateTimeValue = value; Notify(nameof(DateTimeValue)); }
     }
 
-    [PropertyClassification(14, "Guid Value", new[] { "Details" })]
+    [PropertyClassification(15, "Guid Value", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(ShowGuidValue), false)]
     public string? GuidValue
     {
@@ -406,7 +429,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     // Composite (And / Or) property
     // -----------------------------------------------------------------------
 
-    [PropertyClassification(15, "Conditions", new[] { "Details" })]
+    [PropertyClassification(16, "Conditions", new[] { "Details" })]
     [BooleanPropertyHidden(nameof(IsFilterNode), true)]
     public FilterNode[]? Children
     {
@@ -500,6 +523,42 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     [IgnoreDataMember][PropertyHidden] public bool ShowBoolValue     => ShowValueType && !IsUnary && valueType == FilterValueType.BoolValue;
     [IgnoreDataMember][PropertyHidden] public bool ShowDateTimeValue => ShowValueType && !IsUnary && valueType == FilterValueType.DateTimeValue;
     [IgnoreDataMember][PropertyHidden] public bool ShowGuidValue     => ShowValueType && !IsUnary && valueType == FilterValueType.GuidValue;
+    [IgnoreDataMember][PropertyHidden] public bool ShowStringListValue => ShowValueType && !IsUnary && valueType == FilterValueType.StringListValue;
+
+    // The operator that performs the value comparison: the Sub Field Operator for collections, else the Operator.
+    [IgnoreDataMember][PropertyHidden] public string? ComparisonOperator =>
+        IsCollectionField ? subFieldOperator : operatorValue;
+
+    // True when the comparison is In List / Not In List — the value is then always a string[].
+    [IgnoreDataMember][PropertyHidden] public bool UsesValueList => IsValueListOperator(ComparisonOperator);
+
+    /// <summary>.NET type of the field the value is compared against (collection sub-field, dot-path terminal, or plain field).</summary>
+    internal Type? ComparisonFieldType
+    {
+        get
+        {
+            if (IsCollectionField) return OrmFieldHelper.GetFieldNetType(elementTypeName, subField);
+            if (isEntityRefField && fieldName?.Contains('.') == true)
+            {
+                var primaryType = TypeUtilities.FindTypeByFullName(selectedTypeFullName);
+                return primaryType != null ? ResolveEntityRefPathTerminalType(primaryType, fieldName) : null;
+            }
+            return OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
+        }
+    }
+
+    // Switching to or from a value-list operator invalidates the current value type
+    // (single values can't feed In List; String List Value can't feed a scalar comparison).
+    private void CoerceValueTypeForOperator()
+    {
+        if (UsesValueList)
+        {
+            if (!ValueListValueTypes.Contains(valueType ?? string.Empty))
+                valueType = FilterValueType.StepInput;
+        }
+        else if (valueType == FilterValueType.StringListValue)
+            valueType = FilterValueType.StepInput;
+    }
 
     // -----------------------------------------------------------------------
     // Dropdown sources
@@ -625,32 +684,32 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             if (IsCollectionField) return AllListOperators;
             if (IsEntityRefField)
             {
+                // Dot-path: operators for the terminal primitive type
                 if (fieldName.Contains('.'))
-                {
-                    // Dot-path: operators for the terminal primitive type
-                    var primaryTyp = TypeUtilities.FindTypeByFullName(selectedTypeFullName);
-                    var ft = primaryTyp != null ? ResolveEntityRefPathTerminalType(primaryTyp, fieldName) : null;
-                    if (ft == typeof(bool) || ft == typeof(Guid))
-                        return [JoinOperator.Equal, JoinOperator.NotEqual];
-                    if (OrmFieldHelper.IsNumericType(ft) || OrmFieldHelper.IsDateTimeType(ft))
-                        return [JoinOperator.Equal, JoinOperator.NotEqual,
-                                JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
-                                JoinOperator.LessThan,    JoinOperator.LessOrEqual];
-                    return AllPrimitiveOperators;
-                }
+                    return OperatorsForFieldType(ComparisonFieldType);
                 // Bare entity ref: only null checks (as operators, not value types)
                 return [FilterValueType.IsNull, FilterValueType.IsNotNull];
             }
             if (IsUnary) return [];
-            var fieldType = OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName);
-            if (fieldType == typeof(bool) || fieldType == typeof(Guid))
-                return [JoinOperator.Equal, JoinOperator.NotEqual];
-            if (OrmFieldHelper.IsNumericType(fieldType) || OrmFieldHelper.IsDateTimeType(fieldType))
-                return [JoinOperator.Equal, JoinOperator.NotEqual,
-                        JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
-                        JoinOperator.LessThan,    JoinOperator.LessOrEqual];
-            return AllPrimitiveOperators;
+            // Serialized fields are compared as raw text; a value list against them is meaningless
+            if (IsSerializedField) return AllPrimitiveOperators;
+            return OperatorsForFieldType(OrmFieldHelper.GetFieldNetType(selectedTypeFullName, fieldName));
         }
+    }
+
+    /// <summary>Comparison operators valid for a primitive field type, including In List / Not In List (except bool).</summary>
+    private static string[] OperatorsForFieldType(Type? ft)
+    {
+        if (ft == typeof(bool))
+            return [JoinOperator.Equal, JoinOperator.NotEqual];
+        if (ft == typeof(Guid))
+            return [JoinOperator.Equal, JoinOperator.NotEqual, .. ValueListOperators];
+        if (OrmFieldHelper.IsNumericType(ft) || OrmFieldHelper.IsDateTimeType(ft))
+            return [JoinOperator.Equal, JoinOperator.NotEqual,
+                    JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
+                    JoinOperator.LessThan,    JoinOperator.LessOrEqual,
+                    .. ValueListOperators];
+        return [.. AllPrimitiveOperators, .. ValueListOperators];
     }
 
     [IgnoreDataMember][PropertyHidden]
@@ -671,13 +730,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             else
                 return [];
 
-            if (ft == typeof(bool) || ft == typeof(Guid))
-                return [JoinOperator.Equal, JoinOperator.NotEqual];
-            if (OrmFieldHelper.IsNumericType(ft) || OrmFieldHelper.IsDateTimeType(ft))
-                return [JoinOperator.Equal, JoinOperator.NotEqual,
-                        JoinOperator.GreaterThan, JoinOperator.GreaterOrEqual,
-                        JoinOperator.LessThan,    JoinOperator.LessOrEqual];
-            return AllPrimitiveOperators;
+            return OperatorsForFieldType(ft);
         }
     }
 
@@ -686,6 +739,8 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
     {
         get
         {
+            // In List / Not In List: the value is always a string[] — from a step input or hard-coded
+            if (UsesValueList) return ValueListValueTypes;
             if (IsCollectionField)
             {
                 // Count operators: result is always an integer, no sub-field involved
@@ -792,7 +847,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             nameof(ShowOperator),        nameof(ShowSubField),    nameof(ShowSubFieldOperator),
             nameof(ShowValueType),       nameof(ShowStepInput),
             nameof(ShowStringValue),     nameof(ShowNumberValue),
-            nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue));
+            nameof(ShowBoolValue),       nameof(ShowDateTimeValue), nameof(ShowGuidValue), nameof(ShowStringListValue));
         foreach (var child in children ?? [])
             child.PushContext(tables, typeNames);
     }
@@ -878,6 +933,16 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             issues.Add(new ValidationIssue(this, "Date/Time Value must be set."));
         if (valueType == FilterValueType.GuidValue && string.IsNullOrWhiteSpace(guidValue))
             issues.Add(new ValidationIssue(this, "Guid Value must be entered."));
+        if (valueType == FilterValueType.StringListValue)
+        {
+            var ft  = ComparisonFieldType;
+            var bad = (stringListValue ?? [])
+                .Where(e => e != null && !OrmFieldHelper.TryConvertListEntry(e, ft, out _))
+                .ToArray();
+            if (bad.Length > 0)
+                issues.Add(new ValidationIssue(this,
+                    $"String List Value contains entries that are not valid {ft?.Name ?? "values"}: {string.Join(", ", bad)}"));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -928,9 +993,12 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
                 return $"{field} {opLabel}";
             if (string.IsNullOrWhiteSpace(subField))
                 return $"{field} {opLabel} (sub field not set)";
-            string subVal = valueType == FilterValueType.StepInput
-                ? $"@{inputName ?? "?"}"
-                : $"[{valueType ?? "?"}]";
+            string subVal = valueType switch
+            {
+                FilterValueType.StepInput       => $"@{inputName ?? "?"}",
+                FilterValueType.StringListValue => StringListDisplay(),
+                _                               => $"[{valueType ?? "?"}]"
+            };
             return $"{field} {opLabel} {subField} {subFieldOperator ?? "?"} {subVal}";
         }
 
@@ -955,6 +1023,8 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             JoinOperator.LessThan       => "<",
             JoinOperator.LessOrEqual    => "≤",
             JoinOperator.Like           => "LIKE",
+            ListOperator.InList         => "IN",
+            ListOperator.NotInList      => "NOT IN",
             _                           => operatorValue ?? "?"
         };
 
@@ -966,11 +1036,15 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             FilterValueType.BoolValue     => boolValue ? "TRUE" : "FALSE",
             FilterValueType.DateTimeValue => dateTimeValue?.ToString("yyyy-MM-dd") ?? "?",
             FilterValueType.GuidValue     => guidValue ?? "?",
+            FilterValueType.StringListValue => StringListDisplay(),
             _                             => "?"
         };
 
         return $"{field} {opSym} {val}";
     }
+
+    private string StringListDisplay() =>
+        $"({string.Join(", ", (stringListValue ?? []).Select(v => $"'{v}'"))})";
 
     private static string UnaryLabel(string? t) => t switch
     {
@@ -1015,6 +1089,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
         if (op is JoinOperator.GreaterThan or JoinOperator.GreaterOrEqual
                or JoinOperator.LessThan    or JoinOperator.LessOrEqual)
             return t == null || t == typeof(string) || OrmFieldHelper.IsNumericType(t) || OrmFieldHelper.IsDateTimeType(t);
+        if (IsValueListOperator(op)) return t != typeof(bool);
         return true;
     }
 
@@ -1034,6 +1109,7 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             FilterValueType.BoolValue     => t == null || t == typeof(bool),
             FilterValueType.DateTimeValue => t == null || OrmFieldHelper.IsDateTimeType(t),
             FilterValueType.GuidValue     => t == null || t == typeof(Guid),
+            FilterValueType.StringListValue => t != typeof(bool),
             _                             => true
         };
     }

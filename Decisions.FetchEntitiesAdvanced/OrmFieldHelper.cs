@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using DecisionsFramework.Utilities;
 using DecisionsFramework.Utilities.Data;
@@ -56,4 +57,34 @@ internal static class OrmFieldHelper
 
     internal static bool IsDateTimeType(Type? t) =>
         t != null && (t == typeof(DateTime) || t == typeof(DateTimeOffset));
+
+    /// <summary>
+    /// Converts one string entry of an In List / Not In List value to the compared field's type
+    /// (double for numerics, DateTime, Guid, otherwise string). Returns false for null or unparsable entries.
+    /// </summary>
+    internal static bool TryConvertListEntry(string? entry, Type? fieldType, out object value)
+    {
+        value = string.Empty;
+        if (entry == null) return false;
+        if (IsNumericType(fieldType))
+        {
+            if (!double.TryParse(entry, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) return false;
+            value = d;
+            return true;
+        }
+        if (IsDateTimeType(fieldType))
+        {
+            if (!DateTime.TryParse(entry, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)) return false;
+            value = dt;
+            return true;
+        }
+        if (fieldType == typeof(Guid))
+        {
+            if (!Guid.TryParse(entry, out var g)) return false;
+            value = g;
+            return true;
+        }
+        value = entry;
+        return true;
+    }
 }
