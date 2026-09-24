@@ -112,7 +112,8 @@ The step outputs an array of objects with:
 | Sort Order | Ascending | Ascending or Descending. |
 | Limit Results | — | Maximum rows to return. Hidden when Use Paging is enabled. |
 | Use Paging | false | Enables PageSize / PageNumber step inputs. |
-| Respect Permission | true | Applies Decisions permission checks to the query. |
+| Respect Permission | true | Applies Decisions folder permission checks to the primary type. Joined entities are **not** checked unless *Respect Permission on Joins* is enabled. |
+| Respect Permission on Joins | false | Visible when *Respect Permission* is on. Also applies the "can view" folder check to folder-based joined types: output joins only return related entities the user can view, and *Require Match* only counts related rows the user can view. Administrators bypass it, as with the primary type. Adds a permission subquery per join; inside *Require Match* this can be noticeably slower on large tables. |
 | Fetch Deleted Entities | false | Includes soft-deleted rows. |
 | Fast Fetch | true | Uses the ORM fast-fetch path. |
 | Edit Copy | false | Returns editable (detached) entity copies. |

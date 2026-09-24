@@ -413,6 +413,8 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
                     issues.Add(new ValidationIssue(this, "Join Date/Time Value must be set.")); break;
                 case JoinSideType.GuidValue when !joinUseStepInput && string.IsNullOrWhiteSpace(JoinGuidValue):
                     issues.Add(new ValidationIssue(this, "Join Guid Value must be entered.")); break;
+                case JoinSideType.GuidValue when !joinUseStepInput && !Guid.TryParse(JoinGuidValue, out _):
+                    issues.Add(new ValidationIssue(this, "Join Guid Value is not a valid Guid.")); break;
             }
             if (joinUseStepInput && IsLiteralType(joinSideTypeValue) && string.IsNullOrWhiteSpace(joinInputName))
                 issues.Add(new ValidationIssue(this, "Join Input Name must be entered when Use Step Input is enabled."));
@@ -426,6 +428,8 @@ public class FieldMapping : IValidationSource, INotifyPropertyChanged
                     issues.Add(new ValidationIssue(this, "Source Date/Time Value must be set.")); break;
                 case JoinSideType.GuidValue when !sourceUseStepInput && string.IsNullOrWhiteSpace(SourceGuidValue):
                     issues.Add(new ValidationIssue(this, "Source Guid Value must be entered.")); break;
+                case JoinSideType.GuidValue when !sourceUseStepInput && !Guid.TryParse(SourceGuidValue, out _):
+                    issues.Add(new ValidationIssue(this, "Source Guid Value is not a valid Guid.")); break;
             }
             if (sourceUseStepInput && IsLiteralType(sourceSideTypeValue) && string.IsNullOrWhiteSpace(sourceInputName))
                 issues.Add(new ValidationIssue(this, "Source Input Name must be entered when Use Step Input is enabled."));

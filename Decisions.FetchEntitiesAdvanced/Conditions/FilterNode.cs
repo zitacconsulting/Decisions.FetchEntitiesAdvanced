@@ -933,6 +933,8 @@ public class FilterNode : IValidationSource, INotifyPropertyChanged
             issues.Add(new ValidationIssue(this, "Date/Time Value must be set."));
         if (valueType == FilterValueType.GuidValue && string.IsNullOrWhiteSpace(guidValue))
             issues.Add(new ValidationIssue(this, "Guid Value must be entered."));
+        else if (valueType == FilterValueType.GuidValue && !Guid.TryParse(guidValue, out _))
+            issues.Add(new ValidationIssue(this, "Guid Value is not a valid Guid."));
         if (valueType == FilterValueType.StringListValue)
         {
             var ft  = ComparisonFieldType;

@@ -68,7 +68,9 @@ internal static class OrmFieldHelper
         if (entry == null) return false;
         if (IsNumericType(fieldType))
         {
-            if (!double.TryParse(entry, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) return false;
+            // TryParse accepts "NaN"/"Infinity", which can't be embedded as SQL numbers
+            if (!double.TryParse(entry, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)
+                || !double.IsFinite(d)) return false;
             value = d;
             return true;
         }

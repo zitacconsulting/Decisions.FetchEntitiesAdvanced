@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Globalization;
 using System.Reflection;
 using System.Text;
 using Decisions.FetchEntitiesAdvanced;
@@ -58,6 +59,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     [WritableValue] private int? limitResults;
     [WritableValue] private bool usePaging;
     [WritableValue] private bool respectPermission = true;
+    [WritableValue] private bool respectPermissionOnJoins;
     [WritableValue] private bool fetchDeletedEntities;
     [WritableValue] private bool fastFetch = true;
     [WritableValue] private bool editCopy;
@@ -169,6 +171,19 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     {
         get => respectPermission;
         set { respectPermission = value; OnPropertyChanged(nameof(RespectPermission)); }
+    }
+
+    /// <summary>
+    /// Also apply folder permissions to joined entities: output joins only return related entities the
+    /// user can view, and Require Match only counts related rows the user can view. Off by default —
+    /// the check adds a permission subquery per join, which can be costly inside Require Match EXISTS.
+    /// </summary>
+    [PropertyClassification(1, "Respect Permission on Joins", new[] { "Security" })]
+    [BooleanPropertyHidden(nameof(RespectPermission), false)]
+    public bool RespectPermissionOnJoins
+    {
+        get => respectPermissionOnJoins;
+        set { respectPermissionOnJoins = value; OnPropertyChanged(nameof(RespectPermissionOnJoins)); }
     }
 
     // -------------------------------------------------------------------------
@@ -480,8 +495,15 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         statement.NoLock = CompositeSelectStatement.NoLockReadDefault && ReadUncommitted;
         statement.Distinct = true;
 
+        // Account whose folder permissions are applied to joined entities; null = joins unchecked
+        // (option off, or administrator — matching the platform's admin bypass for the primary type).
+        var account = UserContextHolder.GetCurrent()?.GetAccount();
+        string? joinPermAccountId = RespectPermission && RespectPermissionOnJoins
+                                    && account != null && !account.IsAdministrator()
+            ? account.AccountID : null;
+
         // 2. Filter tree → WHERE clause
-        var filterSql = BuildFilterNodesSql(filterNodes, data, primaryType, JoinDefinitions ?? []);
+        var filterSql = BuildFilterNodesSql(filterNodes, data, primaryType, JoinDefinitions ?? [], joinPermAccountId);
         if (filterSql != null)
             statement.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(filterSql));
 
@@ -492,7 +514,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         foreach (var join in JoinDefinitions ?? [])
         {
             if (!join.RequireMatch || join.IsChainedJoin) continue;
-            var existsSql = BuildExistsSql(join, MAIN_ALIAS, JoinDefinitions!, primaryType, data, ref existsAliasCounter);
+            var existsSql = BuildExistsSql(join, MAIN_ALIAS, JoinDefinitions!, primaryType, data, joinPermAccountId, ref existsAliasCounter);
             if (existsSql != null)
                 statement.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(existsSql));
         }
@@ -644,6 +666,9 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
             var relatedStmt = BuildBaseStatement(relatedType);
             relatedStmt.NoLock = CompositeSelectStatement.NoLockReadDefault && ReadUncommitted;
+            var relatedPermSql = JoinPermissionSql(relatedType, "main", joinPermAccountId);
+            if (relatedPermSql != null)
+                relatedStmt.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(relatedPermSql));
 
             var primaryColName = GetOrmColumnName(relatedType, primaryMapping.JoinFieldName!) ?? primaryMapping.JoinFieldName;
             relatedStmt.WhereConditions.WhereConditions.Add(
@@ -676,7 +701,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             {
                 if (!chainedJoin.RequireMatch) continue;
                 if (!string.Equals(chainedJoin.SourceTable, joinEffectiveName, StringComparison.OrdinalIgnoreCase)) continue;
-                var chainedExistsSql = BuildExistsSql(chainedJoin, "main", JoinDefinitions!, primaryType, data, ref chainAliasCounter);
+                var chainedExistsSql = BuildExistsSql(chainedJoin, "main", JoinDefinitions!, primaryType, data, joinPermAccountId, ref chainAliasCounter);
                 if (chainedExistsSql != null)
                     relatedStmt.WhereConditions.WhereConditions.Add(new RawSqlWhereCondition(chainedExistsSql));
             }
@@ -761,10 +786,11 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         FilterNode[]? nodes,
         StepStartData data,
         Type primaryType,
-        JoinDefinition[] allJoins)
+        JoinDefinition[] allJoins,
+        string? joinPermAccountId)
     {
         var parts = (nodes ?? [])
-            .Select(n => BuildFilterNodeSql(n, data, primaryType, allJoins))
+            .Select(n => BuildFilterNodeSql(n, data, primaryType, allJoins, joinPermAccountId))
             .Where(s => s != null)
             .Select(s => s!)
             .ToList();
@@ -778,14 +804,15 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         FilterNode node,
         StepStartData data,
         Type primaryType,
-        JoinDefinition[] allJoins)
+        JoinDefinition[] allJoins,
+        string? joinPermAccountId)
     {
         if (node.IsFilterNode)
-            return BuildFilterLeafSql(node, data, primaryType, allJoins);
+            return BuildFilterLeafSql(node, data, primaryType, allJoins, joinPermAccountId);
 
         // And / Or composite — recurse into children
         var childSqls = (node.Children ?? [])
-            .Select(c => BuildFilterNodeSql(c, data, primaryType, allJoins))
+            .Select(c => BuildFilterNodeSql(c, data, primaryType, allJoins, joinPermAccountId))
             .Where(s => s != null)
             .Select(s => s!)
             .ToList();
@@ -797,11 +824,25 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return $"({string.Join($" {op} ", childSqls)})";
     }
 
+    // An invalid value (bad Guid, non-finite number, …) makes the condition never-true instead of
+    // dropping it, so bad input can only narrow the result — also correct inside OR groups.
     private static string? BuildFilterLeafSql(
         FilterNode node,
         StepStartData data,
         Type primaryType,
-        JoinDefinition[] allJoins)
+        JoinDefinition[] allJoins,
+        string? joinPermAccountId)
+    {
+        try { return BuildFilterLeafSqlCore(node, data, primaryType, allJoins, joinPermAccountId); }
+        catch (InvalidFilterValueException) { return NeverTrue; }
+    }
+
+    private static string? BuildFilterLeafSqlCore(
+        FilterNode node,
+        StepStartData data,
+        Type primaryType,
+        JoinDefinition[] allJoins,
+        string? joinPermAccountId)
     {
         if (string.IsNullOrWhiteSpace(node.FieldName)) return null;
 
@@ -847,6 +888,8 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         if (filterCond == null) return null;
 
         var allConds = onConditions.Append(filterCond);
+        var permSql  = JoinPermissionSql(relatedType, fltAlias, joinPermAccountId);
+        if (permSql != null) allConds = allConds.Append(permSql);
         return $"EXISTS (SELECT 1 FROM {QT(relatedTable)} {fltAlias} WHERE {string.Join(" AND ", allConds)})";
     }
 
@@ -924,7 +967,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         // Count operators — COUNT(*) compared to a threshold; no sub-field needed
         if (FilterNode.CountOperators.Contains(op))
         {
-            string? countVal = BuildCollectionValueExpr(node, data, typeof(double));
+            string? countVal = BuildNodeValueExpr(node, data, typeof(double));
             if (countVal == null) return null;
             string cmpOp = op switch
             {
@@ -960,7 +1003,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         }
         else
         {
-            string? valueExpr = BuildCollectionValueExpr(node, data, valueFt);
+            string? valueExpr = BuildNodeValueExpr(node, data, valueFt);
             if (valueExpr == null) return null;
             compare = expr => ApplyOperator(expr, subOp, valueExpr);
         }
@@ -1032,26 +1075,6 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return $"{tableAlias}.{Q(fkCol)} IN (SELECT erf__.{Q(refPK)} FROM {QT(refTable)} erf__ WHERE {innerWhere})";
     }
 
-    private static string? BuildEntityRefSubValueExpr(FilterNode node, StepStartData data, Type? terminalFieldType)
-    {
-        if (node.ValueType == FilterValueType.StepInput)
-        {
-            if (string.IsNullOrWhiteSpace(node.InputName)) return null;
-            data.Data.TryGetValue(node.InputName!, out var raw);
-            if (raw == null) return null;
-            return FormatFilterValue(raw, terminalFieldType);
-        }
-        return node.ValueType switch
-        {
-            FilterValueType.StringValue   => $"'{(node.StringValue ?? string.Empty).Replace("'", "''")}'",
-            FilterValueType.NumberValue   => (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            FilterValueType.BoolValue     => SqlBool(node.BoolValue),
-            FilterValueType.DateTimeValue => node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            FilterValueType.GuidValue     => SafeGuidLit(node.GuidValue),
-            _ => null
-        };
-    }
-
     /// <summary>
     /// Recursively builds a WHERE fragment by walking a dot-separated sub-field path through entity ref joins.
     /// Single segment (no dot) → comparison on the terminal field.
@@ -1092,7 +1115,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 var literals = ResolveValueListLiterals(node, data, terminalFt);
                 return literals == null ? null : BuildValueListSql(expr, terminalOperator, literals);
             }
-            string? valueExpr = BuildEntityRefSubValueExpr(node, data, terminalFt);
+            string? valueExpr = BuildNodeValueExpr(node, data, terminalFt);
             if (valueExpr == null) return null;
             return ApplyOperator(expr, terminalOperator, valueExpr);
         }
@@ -1125,22 +1148,29 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return primaryType != null ? FilterNode.ResolveEntityRefPathTerminalType(primaryType, node.FieldName) : null;
     }
 
-    private static string? BuildCollectionValueExpr(FilterNode node, StepStartData data, Type? stepInputFieldType)
+    /// <summary>
+    /// SQL literal for a filter node's single comparison value (step input or hard-coded).
+    /// Returns null only when the step input is null (or no value type is set) — callers skip the filter.
+    /// Throws <see cref="InvalidFilterValueException"/> for values that can't be embedded safely.
+    /// </summary>
+    private static string? BuildNodeValueExpr(FilterNode node, StepStartData data, Type? fieldType)
     {
         if (node.ValueType == FilterValueType.StepInput)
         {
             if (string.IsNullOrWhiteSpace(node.InputName)) return null;
             data.Data.TryGetValue(node.InputName!, out var raw);
-            if (raw == null) return null;
-            return FormatFilterValue(raw, stepInputFieldType);
+            if (raw == null) return null; // null input → skip this filter
+            return FormatFilterValue(raw, fieldType);
         }
         return node.ValueType switch
         {
-            FilterValueType.StringValue   => $"'{(node.StringValue ?? string.Empty).Replace("'", "''")}'",
-            FilterValueType.NumberValue   => (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            FilterValueType.StringValue   => SqlString(node.StringValue),
+            FilterValueType.NumberValue   => SqlNumber(node.NumberValue ?? 0),
             FilterValueType.BoolValue     => SqlBool(node.BoolValue),
-            FilterValueType.DateTimeValue => node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            FilterValueType.GuidValue     => SafeGuidLit(node.GuidValue),
+            FilterValueType.DateTimeValue => node.DateTimeValue == null
+                ? throw new InvalidFilterValueException("Date/Time Value is not set.")
+                : SqlDateTime(node.DateTimeValue.Value),
+            FilterValueType.GuidValue     => SqlGuid(node.GuidValue),
             _ => null
         };
     }
@@ -1222,10 +1252,41 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             ? (value ? "1" : "0")
             : (value ? "TRUE" : "FALSE");
 
-    // Validates and embeds a GUID literal safely. Returns null if the value is not a valid GUID,
-    // which callers treat as "skip this condition" — preventing SQL injection via GUID fields.
-    private static string? SafeGuidLit(string? value) =>
-        Guid.TryParse(value, out var g) ? $"'{g:D}'" : null;
+    // --- Literal builders ---------------------------------------------------------
+    // Every value embedded in generated SQL goes through one of these. An invalid value throws
+    // InvalidFilterValueException, which the condition builders turn into NeverTrue so bad input
+    // narrows the result instead of silently dropping the condition.
+
+    private sealed class InvalidFilterValueException(string message) : Exception(message);
+
+    private const string NeverTrue = "1=0";
+
+    private static bool IsPostgres => DynamicORM.DatabaseDriver.DatabaseType == DataBaseTypeEnum.POSTGRES;
+
+    /// <summary>
+    /// Quoted string literal. Quotes are doubled everywhere. PostgreSQL uses an E'' string with backslashes
+    /// doubled too, so it is safe whatever standard_conforming_strings is set to. SQL Server gets the N prefix
+    /// only for non-ASCII values: key/FK columns are varchar, and an N'' literal would force a conversion
+    /// on them (losing index seeks), while ASCII text is identical in either form.
+    /// </summary>
+    private static string SqlString(string? value)
+    {
+        var s = (value ?? string.Empty).Replace("'", "''");
+        if (IsPostgres) return $"E'{s.Replace("\\", "\\\\")}'";
+        return s.Any(c => c > 0x7F) ? $"N'{s}'" : $"'{s}'";
+    }
+
+    private static string SqlNumber(double value) =>
+        double.IsFinite(value)
+            ? value.ToString(CultureInfo.InvariantCulture)
+            : throw new InvalidFilterValueException($"'{value}' is not a finite number.");
+
+    private static string SqlDateTime(DateTime value) => $"'{value:yyyy-MM-dd HH:mm:ss}'";
+
+    private static string SqlGuid(string? value) =>
+        Guid.TryParse(value, out var g)
+            ? $"'{g:D}'"
+            : throw new InvalidFilterValueException($"'{value}' is not a valid Guid.");
 
     private static string? BuildFilterFieldSql(
         FilterNode node,
@@ -1255,49 +1316,36 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             return literals == null ? null : BuildValueListSql(fieldExpr, node.Operator!, literals);
         }
 
-        string? valueExpr;
-        if (node.ValueType == FilterValueType.StepInput)
-        {
-            if (string.IsNullOrWhiteSpace(node.InputName)) return null;
-            data.Data.TryGetValue(node.InputName!, out var raw);
-            if (raw == null) return null; // null input → skip this filter
-            var ft = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
-            valueExpr = FormatFilterValue(raw, ft);
-        }
-        else
-        {
-            valueExpr = node.ValueType switch
-            {
-                FilterValueType.StringValue =>
-                    $"'{(node.StringValue ?? string.Empty).Replace("'", "''")}'",
-                FilterValueType.NumberValue =>
-                    (node.NumberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                FilterValueType.BoolValue =>
-                    SqlBool(node.BoolValue),
-                FilterValueType.DateTimeValue =>
-                    node.DateTimeValue == null ? null : $"'{node.DateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-                FilterValueType.GuidValue =>
-                    SafeGuidLit(node.GuidValue),
-                _ => null
-            };
-        }
-
+        var ft = OrmFieldHelper.GetFieldNetType(node.SelectedTypeFullName, node.FieldName);
+        string? valueExpr = BuildNodeValueExpr(node, data, ft);
         if (valueExpr == null) return null;
 
         return ApplyOperator(fieldExpr, node.Operator ?? JoinOperator.Equal, valueExpr);
     }
 
+    /// <summary>
+    /// SQL literal for a runtime value compared against a field of <paramref name="fieldType"/>.
+    /// Throws <see cref="InvalidFilterValueException"/> when the value doesn't fit the field type.
+    /// </summary>
     private static string FormatFilterValue(object value, Type? fieldType)
     {
         if (fieldType == typeof(bool))
-            return SqlBool(Convert.ToBoolean(value));
+        {
+            try { return SqlBool(Convert.ToBoolean(value, CultureInfo.InvariantCulture)); }
+            catch (Exception ex) when (ex is FormatException or InvalidCastException)
+            { throw new InvalidFilterValueException($"'{value}' is not a valid boolean."); }
+        }
         if (OrmFieldHelper.IsNumericType(fieldType))
-            return Convert.ToDouble(value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        {
+            try { return SqlNumber(Convert.ToDouble(value, CultureInfo.InvariantCulture)); }
+            catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
+            { throw new InvalidFilterValueException($"'{value}' is not a valid number."); }
+        }
         if (OrmFieldHelper.IsDateTimeType(fieldType) && value is DateTime dt)
-            return $"'{dt:yyyy-MM-dd HH:mm:ss}'";
+            return SqlDateTime(dt);
         if (fieldType == typeof(Guid))
-            return $"'{value}'";
-        return $"'{value.ToString()?.Replace("'", "''") ?? string.Empty}'";
+            return SqlGuid(value.ToString());
+        return SqlString(value.ToString());
     }
 
     // --- EXISTS builder (RequireMatch joins, supports nested chains) ----------
@@ -1317,6 +1365,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         JoinDefinition[] allJoins,
         Type primaryType,
         StepStartData data,
+        string? joinPermAccountId,
         ref int aliasCounter)
     {
         var mappings = join.FieldMappings;
@@ -1336,6 +1385,8 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
         var conditions = BuildMappingConditions(mappings, relatedType, sourceType, myAlias, parentAlias, data);
         if (conditions.Count == 0) return null;
+        var permSql = JoinPermissionSql(relatedType, myAlias, joinPermAccountId);
+        if (permSql != null) conditions.Add(permSql);
 
         // Recursively embed RequireMatch chained children as nested EXISTS.
         var effectiveName = join.EffectiveName;
@@ -1345,7 +1396,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
             {
                 if (!childJoin.RequireMatch) continue;
                 if (!string.Equals(childJoin.SourceTable, effectiveName, StringComparison.OrdinalIgnoreCase)) continue;
-                var childSql = BuildExistsSql(childJoin, myAlias, allJoins, primaryType, data, ref aliasCounter);
+                var childSql = BuildExistsSql(childJoin, myAlias, allJoins, primaryType, data, joinPermAccountId, ref aliasCounter);
                 if (childSql != null) conditions.Add(childSql);
             }
         }
@@ -1357,17 +1408,16 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
 
     private static void ApplyFolderFilter(CompositeSelectStatement stmt, Type entityType, string folderId, bool readUncommitted = false)
     {
-        // Validate folderId is a real GUID before embedding in SQL — prevents injection
-        // if a non-GUID value reaches this point via the FolderId step input.
-        if (!Guid.TryParse(folderId, out var folderGuid)) return;
-        string safeFolderId = folderGuid.ToString("D");
+        // Escaped rather than GUID-validated: folder IDs aren't guaranteed to be GUIDs, and skipping the
+        // filter for a non-GUID value would return entities from every folder.
+        string safeFolderId = SqlString(folderId);
 
         bool noLock = CompositeSelectStatement.NoLockReadDefault && readUncommitted;
         string noLockHint = noLock ? " (nolock) " : string.Empty;
 
         string fieldName = entityType == typeof(Folder) ? "folder_id" : "entity_folder_id";
-        string subQuery  = $"select child_folder_id from folder_parent_xref{noLockHint} where folder_id = '{safeFolderId}' " +
-                           $"union all select folder_id as child_folder_id from entity_folder{noLockHint} where folder_id = '{safeFolderId}'";
+        string subQuery  = $"select child_folder_id from folder_parent_xref{noLockHint} where folder_id = {safeFolderId} " +
+                           $"union all select folder_id as child_folder_id from entity_folder{noLockHint} where folder_id = {safeFolderId}";
 
         stmt.JoinList.Add(new CompositeSelectStatement.JoinDefinition(
             CompositeSelectStatement.JoinType.InnerJoin,
@@ -1379,6 +1429,30 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                     FieldConverter = new KeyFieldConverter()
                 }
             }))));
+    }
+
+    // --- Join permission filter ---------------------------------------------
+
+    /// <summary>
+    /// "Can view" folder-permission predicate for a joined folder entity at <paramref name="alias"/>, or null
+    /// when no check applies (option off / administrator, or the type isn't folder-based). Same rule as
+    /// FolderService.BuildStatementForEntitiesWithPermission uses for the primary type: the entity's folder's
+    /// security folder must grant can_view to the account. Written as an IN subquery so it can't duplicate rows.
+    /// </summary>
+    private static string? JoinPermissionSql(Type entityType, string alias, string? accountId)
+    {
+        if (accountId == null || !typeof(AbstractFolderEntity).IsAssignableFrom(entityType)) return null;
+
+        string permittedFolders =
+            $"SELECT xref.{Q("folder_id")} FROM {QT("vwGetFolderPerms")} xref " +
+            $"WHERE xref.{Q("account_id")} = {SqlString(accountId)} AND xref.{Q("can_view")} = {SqlBool(true)}";
+
+        // A folder row carries its own security folder; any other entity uses its containing folder's.
+        if (entityType == typeof(Folder))
+            return $"{alias}.{Q("security_folder_id")} IN ({permittedFolders})";
+
+        return $"{alias}.{Q("entity_folder_id")} IN (SELECT ef.{Q("folder_id")} FROM {QT("entity_folder")} ef " +
+               $"WHERE ef.{Q("security_folder_id")} IN ({permittedFolders}))";
     }
 
     // --- DTO instantiation ---------------------------------------------------
@@ -1925,7 +1999,7 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         var idList = string.Join(",", entities
             .Select(e => e.GetPrimaryKeyValue())
             .Where(id => id != null)
-            .Select(id => $"'{id!.Replace("'", "''")}'"));
+            .Select(id => SqlString(id)));
         if (string.IsNullOrWhiteSpace(idList)) return result;
 
         var sql = $"SELECT {Q(pkName)}, {Q(columnName)} FROM {QT(tableName)} WHERE {Q(pkName)} IN ({idList})";
@@ -1985,13 +2059,23 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
                 continue;
             }
 
-            string? leftExpr = m.JoinUseStepInput && FieldMapping.IsLiteralType(m.JoinValueType) && stepData != null
-                ? ResolveStepInputExpr(m.JoinValueType, m.JoinInputName, stepData)
-                : ResolveMappingExpr(m.JoinValueType, m.JoinFieldName, m.JoinStringValue, m.JoinNumberValue, m.JoinBoolValue, m.JoinDateTimeValue, m.JoinGuidValue, joinType, joinAlias);
+            string? leftExpr, rightExpr;
+            try
+            {
+                leftExpr = m.JoinUseStepInput && FieldMapping.IsLiteralType(m.JoinValueType) && stepData != null
+                    ? ResolveStepInputExpr(m.JoinValueType, m.JoinInputName, stepData)
+                    : ResolveMappingExpr(m.JoinValueType, m.JoinFieldName, m.JoinStringValue, m.JoinNumberValue, m.JoinBoolValue, m.JoinDateTimeValue, m.JoinGuidValue, joinType, joinAlias);
 
-            string? rightExpr = m.SourceUseStepInput && FieldMapping.IsLiteralType(m.SourceValueType) && stepData != null
-                ? ResolveStepInputExpr(m.SourceValueType, m.SourceInputName, stepData)
-                : ResolveMappingExpr(m.SourceValueType, m.SourceFieldName, m.SourceStringValue, m.SourceNumberValue, m.SourceBoolValue, m.SourceDateTimeValue, m.SourceGuidValue, sourceType, sourceAlias);
+                rightExpr = m.SourceUseStepInput && FieldMapping.IsLiteralType(m.SourceValueType) && stepData != null
+                    ? ResolveStepInputExpr(m.SourceValueType, m.SourceInputName, stepData)
+                    : ResolveMappingExpr(m.SourceValueType, m.SourceFieldName, m.SourceStringValue, m.SourceNumberValue, m.SourceBoolValue, m.SourceDateTimeValue, m.SourceGuidValue, sourceType, sourceAlias);
+            }
+            catch (InvalidFilterValueException)
+            {
+                // Invalid value → the join condition can never match (never silently dropped)
+                conditions.Add(NeverTrue);
+                continue;
+            }
 
             if (leftExpr == null || rightExpr == null) continue;
 
@@ -2014,11 +2098,13 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
         return sideType switch
         {
             JoinSideType.Field         => ResolveMappingExprField(fieldName, entityType, alias),
-            JoinSideType.StringValue   => $"'{(stringValue ?? string.Empty).Replace("'", "''")}'",
-            JoinSideType.NumberValue   => (numberValue ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            JoinSideType.StringValue   => SqlString(stringValue),
+            JoinSideType.NumberValue   => SqlNumber(numberValue ?? 0),
             JoinSideType.BoolValue     => SqlBool(boolValue),
-            JoinSideType.DateTimeValue => dateTimeValue == null ? null : $"'{dateTimeValue.Value:yyyy-MM-dd HH:mm:ss}'",
-            JoinSideType.GuidValue     => SafeGuidLit(guidValue),
+            JoinSideType.DateTimeValue => dateTimeValue == null
+                ? throw new InvalidFilterValueException("Date/Time Value is not set.")
+                : SqlDateTime(dateTimeValue.Value),
+            JoinSideType.GuidValue     => SqlGuid(guidValue),
             _ => null
         };
     }
@@ -2054,14 +2140,16 @@ public class AdvancedFetchEntitiesStep : BaseFlowAwareStep, ISyncStep, IDataCons
     {
         if (string.IsNullOrWhiteSpace(inputName)) return null;
         stepData.Data.TryGetValue(inputName, out var rawValue);
-        if (rawValue == null) return null;
+        if (rawValue == null) return null; // null input → skip this condition
         return sideType switch
         {
-            JoinSideType.StringValue   => $"'{rawValue.ToString()?.Replace("'", "''") ?? string.Empty}'",
-            JoinSideType.NumberValue   => Convert.ToDouble(rawValue).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            JoinSideType.BoolValue     => SqlBool(Convert.ToBoolean(rawValue)),
-            JoinSideType.DateTimeValue => rawValue is DateTime dt ? $"'{dt:yyyy-MM-dd HH:mm:ss}'" : null,
-            JoinSideType.GuidValue     => SafeGuidLit(rawValue?.ToString()),
+            JoinSideType.StringValue   => SqlString(rawValue.ToString()),
+            JoinSideType.NumberValue   => FormatFilterValue(rawValue, typeof(double)),
+            JoinSideType.BoolValue     => FormatFilterValue(rawValue, typeof(bool)),
+            JoinSideType.DateTimeValue => rawValue is DateTime dt
+                ? SqlDateTime(dt)
+                : throw new InvalidFilterValueException($"'{rawValue}' is not a valid date/time."),
+            JoinSideType.GuidValue     => SqlGuid(rawValue.ToString()),
             _ => null
         };
     }
